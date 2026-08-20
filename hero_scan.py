@@ -456,6 +456,12 @@ def main():
     # 更新 Excel
     # ========================================================
 
+    # 和其他已有数据格子一样的填充色
+    cell_fill = PatternFill(
+        fill_type="solid",
+        fgColor="E2F0D9"
+    )
+
     new_heroes = 0
     new_resources = 0
 
@@ -565,11 +571,22 @@ def main():
                         old_time is None
                         or str(old_time).strip() != str(last_modified).strip()
                 ):
-                    ws.cell(
+                    time_cell = ws.cell(
                         row=row,
                         column=time_col,
                         value=last_modified
                     )
+
+                    name_cell = ws.cell(
+                        row=row,
+                        column=name_col
+                    )
+
+                    # 出现新的 Last-Modified：
+                    # 给 编号-Last-Modified 和 编号-皮肤名 两个格子
+                    # 涂上和其他格子一样的颜色
+                    time_cell.fill = cell_fill
+                    name_cell.fill = cell_fill
 
                     new_resources += 1
 
