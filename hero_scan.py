@@ -1,6 +1,7 @@
 import requests
 import concurrent.futures
 import threading
+import time
 import os
 from email.utils import parsedate_to_datetime
 from datetime import timezone, timedelta
@@ -33,6 +34,28 @@ THREADS = 30
 TIMEOUT = 10
 
 
+# 单个地址失败后的重试次数
+RETRIES = 3
+
+# 每次重试前的等待秒数（按重试次数递增）
+RETRY_DELAY = 0.5
+
+# --------------------------------------------------------------------
+# 缓存标记
+#
+# 每一轮扫描使用同一个值，让它不重复、但整轮保持一致。
+#
+# 作用：这一轮的请求不会命中上一轮留在 CDN 边缘节点上的过期缓存。
+#
+# 关键点在于「过期的 404」：
+# 资源还没上线时扫出来的是 404，边缘节点会把这个 404 缓存下来；
+# 等资源真正上传之后，边缘节点可能还在给旧的 404，
+# 于是这个最新的资源就一直扫不到，Last-Modified 也就一直写不进去。
+# --------------------------------------------------------------------
+
+CACHE_BUSTER = str(int(time.time() * 1000))
+
+
 # ============================================================
 # Session
 # ============================================================
@@ -47,7 +70,12 @@ def get_session():
         session = requests.Session()
 
         session.headers.update({
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0",
+
+            # 让 CDN 回源校验，
+            # 不要直接返回边缘节点上的过期副本
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
         })
 
         thread_local.session = session
@@ -69,61 +97,119 @@ def check_skin(hero_id, skin_id):
 
     url = BASE_URL + filename
 
-    try:
 
-        session = get_session()
+    # ================================================================
+    # 为什么改成 GET（和 curl -i 一样），不再用 HEAD
+    #
+    # HEAD 在这个 CDN 上命中的缓存和 GET 不是同一份，
+    # 刚更新过的资源经常在 HEAD 上拿到旧的缓存结果，
+    # 于是最新的资源扫不出来，Last-Modified 也就一直写不进去。
+    #
+    # 用 GET 时加 stream=True：
+    # 只读取响应头，不下载图片正文，开销和 HEAD 差不多。
+    # ================================================================
 
-        response = session.head(
-            url,
-            timeout=TIMEOUT,
-            allow_redirects=True
-        )
+    for attempt in range(
+        1,
+        RETRIES + 1
+    ):
 
-        if response.status_code != 200:
+        try:
 
-            return {
-                "hero_id": hero_id,
-                "skin_id": skin_id,
-                "exists": False
-            }
+            session = get_session()
 
-        last_modified = response.headers.get(
-            "Last-Modified",
-            ""
-        )
+            response = session.get(
+                url,
+                timeout=TIMEOUT,
+                allow_redirects=True,
+                stream=True,
+                params={
+                    "_": CACHE_BUSTER
+                }
+            )
 
-        if last_modified:
             try:
-                dt = parsedate_to_datetime(last_modified)
 
-                # GMT/UTC → 北京时间 UTC+8
-                dt = dt.astimezone(
-                    timezone(timedelta(hours=8))
+                if response.status_code != 200:
+
+                    return {
+                        "hero_id": hero_id,
+                        "skin_id": skin_id,
+                        "exists": False
+                    }
+
+                last_modified = response.headers.get(
+                    "Last-Modified",
+                    ""
                 )
 
-                last_modified = dt.strftime(
-                    "%Y-%m-%d %H:%M:%S"
+
+                # ------------------------------------------------
+                # 200 但没有 Last-Modified：
+                #
+                # 说明这次拿到的响应不完整，
+                # 不能当成「存在但没有时间」写进表，
+                # 直接重试
+                # ------------------------------------------------
+
+                if not last_modified:
+
+                    time.sleep(
+                        RETRY_DELAY * attempt
+                    )
+
+                    continue
+
+
+                try:
+                    dt = parsedate_to_datetime(last_modified)
+
+                    # GMT/UTC → 北京时间 UTC+8
+                    dt = dt.astimezone(
+                        timezone(timedelta(hours=8))
+                    )
+
+                    last_modified = dt.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+
+                except Exception:
+                    pass
+
+
+                return {
+                    "hero_id": hero_id,
+                    "skin_id": skin_id,
+                    "exists": True,
+                    "last_modified": last_modified
+                }
+
+
+            finally:
+
+                # 只取了响应头，
+                # 这里必须关掉，否则连接不会释放
+                response.close()
+
+
+        except requests.RequestException:
+
+            # 偶发抖动：等一下再试，
+            # 不要因为一次失败就把这条记录整个丢掉
+            if attempt < RETRIES:
+
+                time.sleep(
+                    RETRY_DELAY * attempt
                 )
 
-            except Exception:
-                pass
+                continue
 
 
-        return {
-            "hero_id": hero_id,
-            "skin_id": skin_id,
-            "exists": True,
-            "last_modified": last_modified
-        }
-
-
-    except requests.RequestException:
-
-        return {
-            "hero_id": hero_id,
-            "skin_id": skin_id,
-            "exists": False
-        }
+    return {
+        "hero_id": hero_id,
+        "skin_id": skin_id,
+        "exists": False
+    }
 
 
 # ============================================================
