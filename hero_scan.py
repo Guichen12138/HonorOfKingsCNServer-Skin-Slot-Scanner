@@ -28,7 +28,10 @@ SKIN_START = 0
 SKIN_END = 19
 
 # 并发线程
-THREADS = 30
+#
+# 30 → 64：实测 64 再往上（96）没有增益，
+# 64 是这台 CDN 的性价比点
+THREADS = 64
 
 # 请求超时时间
 TIMEOUT = 10
@@ -130,7 +133,55 @@ def check_skin(hero_id, skin_id):
 
             try:
 
-                if response.status_code != 200:
+                status = response.status_code
+
+
+                # ------------------------------------------------
+                # 429 / 5xx 是服务器临时繁忙或限流，
+                # 不能当成「资源不存在」，要重试
+                #
+                # 404 之类的才是真的不存在
+                # ------------------------------------------------
+
+                if (
+                        status == 429
+                        or 500 <= status < 600
+                ):
+
+                    if attempt < RETRIES:
+
+                        # 读掉小错误体：
+                        # 不读的话这个连接会被整个丢弃，
+                        # 下一个请求又要重新 TCP+TLS 握手，
+                        # 这正是之前扫描慢的主要原因
+                        response.content
+
+                        time.sleep(
+                            RETRY_DELAY * attempt
+                        )
+
+                        continue
+
+
+                    # 重试次数用完还是失败：
+                    # 标记为失败，让统计能看出来
+
+                    response.content
+
+                    return {
+                        "hero_id": hero_id,
+                        "skin_id": skin_id,
+                        "exists": False,
+                        "failed": True
+                    }
+
+
+                if status != 200:
+
+                    # 同上：读掉 404 的小错误体
+                    # （几百字节的 XML，很便宜），
+                    # 让连接可以复用给下一个请求
+                    response.content
 
                     return {
                         "hero_id": hero_id,
@@ -205,10 +256,15 @@ def check_skin(hero_id, skin_id):
                 continue
 
 
+    # 重试全部用完还是失败：
+    # 标记为失败，让统计能看出来，
+    # 提醒用户这一格本次没扫到
+
     return {
         "hero_id": hero_id,
         "skin_id": skin_id,
-        "exists": False
+        "exists": False,
+        "failed": True
     }
 
 
@@ -219,6 +275,10 @@ def check_skin(hero_id, skin_id):
 def scan_hero(hero_id):
 
     results = []
+
+    # 这一英雄有多少个格子重试完还是失败
+    failed = 0
+
 
     for skin_id in range(
         SKIN_START,
@@ -234,7 +294,11 @@ def scan_hero(hero_id):
 
             results.append(result)
 
-    return hero_id, results
+        elif result.get("failed"):
+
+            failed += 1
+
+    return hero_id, results, failed
 
 
 # ============================================================
@@ -484,33 +548,62 @@ def main():
 
     all_results = {}
 
+    # 重试完还是失败的请求数
+    total_failed = 0
 
-    with concurrent.futures.ThreadPoolExecutor(
+    # 整个英雄任务崩掉的数量
+    scan_errors = 0
+
+    # 是否被 Ctrl+C 手动中断
+    interrupted = False
+
+
+    executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=THREADS
-    ) as executor:
+    )
 
-        futures = {
-            executor.submit(
-                scan_hero,
-                hero_id
-            ): hero_id
-            for hero_id in range(
-                HERO_START,
-                HERO_END + 1
-            )
-        }
+    futures = {
+        executor.submit(
+            scan_hero,
+            hero_id
+        ): hero_id
+        for hero_id in range(
+            HERO_START,
+            HERO_END + 1
+        )
+    }
 
 
-        completed = 0
+    completed = 0
 
+
+    try:
 
         for future in concurrent.futures.as_completed(
             futures
         ):
 
-            hero_id, results = future.result()
+            # ------------------------------------------------
+            # 单个英雄的任务崩了，
+            # 记一笔继续跑，
+            # 不能让整轮扫描的结果全部丢掉
+            # ------------------------------------------------
+
+            try:
+
+                hero_id, results, failed = future.result()
+
+            except Exception:
+
+                scan_errors += 1
+
+                completed += 1
+
+                continue
 
             completed += 1
+
+            total_failed += failed
 
 
             if results:
@@ -528,12 +621,46 @@ def main():
             )
 
 
+    except KeyboardInterrupt:
+
+        # ------------------------------------------------
+        # Ctrl+C：取消还没开始的任务，
+        # 已扫完的部分照常保存，不白跑
+        # ------------------------------------------------
+
+        interrupted = True
+
+        executor.shutdown(
+            wait=False,
+            cancel_futures=True
+        )
+
+
+    else:
+
+        executor.shutdown(wait=True)
+
+
     print()
     print()
 
-    print(
-        "扫描完成，开始更新 Excel……"
-    )
+    if interrupted:
+
+        print(
+            f"已手动中断：本次只扫完 "
+            f"{completed}/{total_heroes} 个英雄。"
+        )
+
+        print(
+            "已扫完的部分会照常保存，"
+            "建议之后完整重跑一次。"
+        )
+
+    else:
+
+        print(
+            "扫描完成，开始更新 Excel……"
+        )
 
     print()
 
@@ -549,7 +676,12 @@ def main():
     )
 
     new_heroes = 0
-    new_resources = 0
+
+    # 原来 没有 → 这次有：新增
+    new_records = 0
+
+    # 原来 有 → 这次时间变了：更新
+    updated_records = 0
 
 
     for hero_id in sorted(
@@ -674,7 +806,15 @@ def main():
                     time_cell.fill = cell_fill
                     name_cell.fill = cell_fill
 
-                    new_resources += 1
+                    # 区分「新增」和「更新」两种情况
+
+                    if old_time is None:
+
+                        new_records += 1
+
+                    else:
+
+                        updated_records += 1
 
 
     # ========================================================
@@ -780,11 +920,30 @@ def main():
     )
 
     print(
-        f"新增资源时间记录："
-        f"{new_resources}"
+        f"新增 Last-Modified："
+        f"{new_records}"
+    )
+
+    print(
+        f"更新 Last-Modified："
+        f"{updated_records}"
     )
 
     print()
+
+    if total_failed or scan_errors:
+
+        print(
+            f"注意：{total_failed} 个请求、"
+            f"{scan_errors} 个英雄任务失败，"
+            f"这些格子本次没有扫到。"
+        )
+
+        print(
+            "建议再完整跑一次补齐。"
+        )
+
+        print()
 
     print(
         f"Excel：{EXCEL_FILE}"
@@ -797,7 +956,8 @@ def main():
     )
 
     print(
-        "已有 Last-Modified 不会被覆盖。"
+        "已有 Last-Modified 以服务器最新值为准，"
+        "有更新会自动刷新并高亮。"
     )
 
     print()

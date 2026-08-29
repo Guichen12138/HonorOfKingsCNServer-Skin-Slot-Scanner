@@ -109,6 +109,11 @@ for col in range(
 
 heroes = []
 
+# 实际有效的英雄数量
+# （不直接用 ws.max_row - 1，
+#   那样会把中间或末尾的空行也算进去）
+total_hero_count = 0
+
 
 for row in range(
     2,
@@ -139,6 +144,8 @@ for row in range(
     except ValueError:
 
         continue
+
+    total_hero_count += 1
 
 
     # ========================================================
@@ -267,7 +274,7 @@ print()
 
 print(
     f"Excel 中共有 "
-    f"{ws.max_row - 1} 个英雄"
+    f"{total_hero_count} 个英雄"
 )
 
 print(
@@ -277,108 +284,135 @@ print(
 print()
 
 print(
-    "每次按一次回车："
-    "打开当前英雄尚未填写皮肤名的海报。"
-)
-
-print(
-    "你处理完当前英雄后，再按一次回车进入下一个英雄。"
+    "每个英雄的海报会自动打开，"
+    "处理完当前英雄后，"
+    "按一次回车进入下一个英雄。"
 )
 
 print()
 
 print("=" * 70)
 
-input(
-    "按回车开始..."
-)
+
+# ============================================================
+# 没有需要处理的英雄：直接结束
+# ============================================================
+
+if not heroes:
+
+    print()
+
+    print(
+        "没有需要处理的英雄，"
+        "所有海报都已填写皮肤名。"
+    )
+
+    print()
+
+    input(
+        "按回车退出..."
+    )
+
+    exit()
 
 
 # ============================================================
 # 一个英雄一个英雄处理
 # ============================================================
 
-for index, hero in enumerate(
-    heroes
-):
-
-    hero_id = hero["hero_id"]
-
-    hero_name = hero["hero_name"]
-
-    skins = hero["skins"]
+# 是否被 Ctrl+C 手动中断
+interrupted = False
 
 
-    print()
+try:
 
-    print("-" * 70)
+    for index, hero in enumerate(
+        heroes
+    ):
 
-    print(
-        f"[{index + 1}/{len(heroes)}] "
-        f"{hero_id:03d} {hero_name}"
-    )
+        hero_id = hero["hero_id"]
 
-    print()
+        hero_name = hero["hero_name"]
 
-    print(
-        "本次需要查看的格子："
-        + " ".join(
-            f"{skin['skin_id']:02d}"
-            for skin in skins
-        )
-    )
-
-    print()
-
-    input(
-        "按回车打开这些海报..."
-    )
+        skins = hero["skins"]
 
 
-    # ========================================================
-    # 打开当前英雄尚未处理的海报
-    # ========================================================
+        print()
 
-    print()
-
-    print(
-        f"正在打开 "
-        f"{hero_id:03d} {hero_name} ..."
-    )
-
-    print()
-
-
-    for skin in skins:
+        print("-" * 70)
 
         print(
-            f"{skin['skin_id']:02d} → "
-            f"{skin['url']}"
+            f"[{index + 1}/{len(heroes)}] "
+            f"{hero_id:03d} {hero_name}"
         )
 
-        webbrowser.open_new_tab(
-            skin["url"]
+        print()
+
+        print(
+            "本次需要查看的格子："
+            + " ".join(
+                f"{skin['skin_id']:02d}"
+                for skin in skins
+            )
         )
 
+
+        # ========================================================
+        # 直接打开当前英雄未处理的海报
+        # ========================================================
+
+        print()
+
+        print(
+            f"正在打开 "
+            f"{hero_id:03d} {hero_name} ..."
+        )
+
+        print()
+
+
+        for skin in skins:
+
+            print(
+                f"{skin['skin_id']:02d} → "
+                f"{skin['url']}"
+            )
+
+            webbrowser.open_new_tab(
+                skin["url"]
+            )
+
+
+        print()
+
+        print(
+            f"{hero_id:03d} {hero_name} "
+            f"的未处理海报已全部打开。"
+        )
+
+
+        # ========================================================
+        # 等待用户处理完当前英雄
+        # ========================================================
+
+        if index < len(heroes) - 1:
+
+            input(
+                "\n处理完当前英雄后，"
+                "按回车进入下一个英雄..."
+            )
+
+
+except KeyboardInterrupt:
+
+    interrupted = True
 
     print()
 
     print(
-        f"{hero_id:03d} {hero_name} "
-        f"的未处理海报已全部打开。"
+        "已手动中断，"
+        "已填写的内容保留在 Excel 里。"
     )
-
-
-    # ========================================================
-    # 等待用户处理完当前英雄
-    # ========================================================
-
-    if index < len(heroes) - 1:
-
-        input(
-            "\n处理完当前英雄后，"
-            "按回车打开下一个英雄..."
-        )
 
 
 # ============================================================
@@ -389,12 +423,26 @@ print()
 
 print("=" * 70)
 
-print(
-    "所有未处理的英雄海报已经查看完成。"
-)
+if interrupted:
+
+    print(
+        "本次处理被中断，"
+        "下次运行会从还没填写的格子继续。"
+    )
+
+else:
+
+    print(
+        "所有未处理的英雄海报已经查看完成。"
+    )
 
 print("=" * 70)
 
-input(
-    "按回车退出..."
-)
+try:
+
+    input(
+        "按回车退出..."
+    )
+
+except KeyboardInterrupt:
+    pass
