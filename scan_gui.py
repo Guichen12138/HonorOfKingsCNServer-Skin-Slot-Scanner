@@ -13,9 +13,11 @@
 - Git 区块：提交信息输入框 + 一键 add / commit / push，
   推送默认走 Clash 代理（这台机器直连 GitHub 不通）
 
-重新打包 exe（PyInstaller 在 F:\\conda3 里）：
+重新打包 exe（PyInstaller 在 F:\\Anaconda\\envs\\hujiaqi 里；
+注意：不要用 F:\\conda3 打包，它打出来的 exe 会报
+「DLL load failed while importing QtCore」）：
 
-    F:\\conda3\\python.exe -m PyInstaller --noconfirm --clean \
+    F:\\Anaconda\\envs\\hujiaqi\\python.exe -m PyInstaller --noconfirm --clean \
         --onefile --noconsole --name "皮肤扫描工具" \
         --distpath "E:\\feverapps\\123" \
         --workpath <临时目录> --specpath <临时目录> \
