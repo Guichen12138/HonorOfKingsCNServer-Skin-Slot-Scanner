@@ -820,13 +820,13 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------
 
     @guarded
-    def send_enter(self):
+    def send_enter(self, _checked=False):
 
         if self.process is not None:
             self.process.write(b"\n")
 
     @guarded
-    def stop_scan(self):
+    def stop_scan(self, _checked=False):
 
         if self.process is None:
             return
@@ -844,11 +844,18 @@ class MainWindow(QMainWindow):
             self.process.kill()
 
     @guarded
-    def on_scan_finished(self):
+    def on_scan_finished(
+        self, exit_code=0, exit_status=0
+    ):
+
+        # QProcess.finished 信号带两个参数
+        # (exitCode, exitStatus)，必须接收，
+        # 否则触发 TypeError
 
         log_event(
             f"on_scan_finished: kind="
-            f"{getattr(self, '_scan_kind', '?')}"
+            f"{getattr(self, '_scan_kind', '?')} "
+            f"exit={exit_code} status={exit_status}"
         )
 
         # 缓冲区里可能还有半行
@@ -904,7 +911,7 @@ class MainWindow(QMainWindow):
     # ========================================================
 
     @guarded
-    def open_excel(self):
+    def open_excel(self, _checked=False):
 
         if not os.path.exists(self.excel_path):
 
@@ -921,7 +928,7 @@ class MainWindow(QMainWindow):
     # ========================================================
 
     @guarded
-    def refresh_git_status(self):
+    def refresh_git_status(self, _checked=False):
 
         if self.git_worker is not None:
             return
@@ -961,7 +968,7 @@ class MainWindow(QMainWindow):
         )
 
     @guarded
-    def commit_and_push(self):
+    def commit_and_push(self, _checked=False):
 
         if self.git_worker is not None:
 
