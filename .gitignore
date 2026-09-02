@@ -1,0 +1,8 @@
+# IDE
+.idea/
+
+# 打包产物（38MB，不入库；重打命令见 scan_gui.py 注释）
+皮肤扫描工具.exe
+
+# Python 缓存
+__pycache__/
