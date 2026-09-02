@@ -30,9 +30,17 @@ import shutil
 import subprocess
 import sys
 
+# 崩溃诊断：excepthook + faulthandler 把所有异常写进日志文件，
+# 否则 --noconsole 的 exe 一闪退什么痕迹都没有
+import faulthandler
+import functools
+import traceback
+from datetime import datetime
+
 from PyQt5.QtCore import (
     Qt,
     QProcess,
+    QProcessEnvironment,
     QThread,
     pyqtSignal,
 )
@@ -79,6 +87,104 @@ SKIN_SCRIPT_NAME = "skin_scan.py"
 
 # Clash Verge 本机代理端口
 PROXY_URL = "http://127.0.0.1:7897"
+
+# ============================================================
+# 崩溃日志
+# ============================================================
+
+LOG_PATH = os.path.join(APP_DIR, "scan_gui_error.log")
+
+_log_file = None
+
+
+def _get_log():
+
+    global _log_file
+
+    if _log_file is None:
+
+        try:
+            _log_file = open(
+                LOG_PATH, "a", encoding="utf-8"
+            )
+        except OSError:
+            _log_file = False
+
+    return _log_file or None
+
+
+def log_event(message):
+
+    """往崩溃日志里追加一行带时间戳的事件"""
+
+    handle = _get_log()
+
+    if handle is None:
+        return
+
+    try:
+
+        handle.write(
+            datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            + "  "
+            + message
+            + "\n"
+        )
+        handle.flush()
+
+    except OSError:
+        pass
+
+
+def log_exception(exc_type, exc_value, exc_tb):
+
+    text = "".join(
+        traceback.format_exception(
+            exc_type, exc_value, exc_tb
+        )
+    )
+
+    log_event("未处理异常：\n" + text)
+
+    return text
+
+
+def guarded(func):
+
+    """
+    槽函数保护罩：PyQt5 里槽函数抛出未捕获异常
+    会直接 abort 整个程序（表现为闪退）。
+    抓住异常 → 写日志 → 弹窗提示，不再闪退。
+    """
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+
+        try:
+            return func(self, *args, **kwargs)
+
+        except Exception as exc:
+
+            text = log_exception(
+                type(exc), exc,
+                exc.__traceback__,
+            )
+
+            try:
+                QMessageBox.critical(
+                    self, "操作出错",
+                    "出了点问题，没有崩溃。\n"
+                    "详情已写入：\n" + LOG_PATH
+                    + "\n\n" + str(exc),
+                )
+            except Exception:
+                pass
+
+            return None
+
+    return wrapper
 
 
 # ============================================================
@@ -152,6 +258,30 @@ def find_python():
 
     # 实在找不到，交给系统 PATH 碰运气
     return "python"
+
+
+def windowless_python(python_exe):
+
+    """
+    子进程优先用 pythonw.exe（无控制台程序，不会闪黑窗）。
+
+    注意：不要试图用 QProcess.setCreateProcessArgumentsModifier
+    压黑窗——pip 版 PyQt5 的绑定里没有这个方法，
+    调用即 AttributeError，而 PyQt5 槽函数里的未捕获异常
+    会让整个程序闪退（这个坑实际踩过）。
+    """
+
+    if python_exe.lower().endswith("python.exe"):
+
+        candidate = (
+            python_exe[: -len("python.exe")]
+            + "pythonw.exe"
+        )
+
+        if os.path.exists(candidate):
+            return candidate
+
+    return python_exe
 
 
 # ============================================================
@@ -523,7 +653,10 @@ class MainWindow(QMainWindow):
     # 运行脚本（子进程）
     # ========================================================
 
+    @guarded
     def start_scan(self, kind):
+
+        log_event(f"start_scan({kind}) 进入")
 
         if self.process is not None:
             QMessageBox.information(
@@ -554,24 +687,16 @@ class MainWindow(QMainWindow):
         )
 
         # 子进程 print 中文时强制 UTF-8，
-        # 否则 Windows 管道默认 GBK 会乱码
-        env = QProcess.systemEnvironment()
-        env = self._with_env(
-            env, "PYTHONIOENCODING", "utf-8"
-        )
-        self.process.setEnvironment(env)
-
-        # GUI 程序拉起的 python.exe 会闪一个黑窗口，
-        # 用 CREATE_NO_WINDOW 压住
-        def no_window(args):
-            args.creationFlags = (
-                args.creationFlags | 0x08000000
-            )
-
-        self._no_window_hook = no_window
-        self.process.setCreateProcessArgumentsModifier(
-            no_window
-        )
+        # 否则 Windows 管道默认 GBK 会乱码；
+        # PYTHONUNBUFFERED 让输出实时进来不积压。
+        # 注意：pip 版 PyQt5 只暴露新式
+        # setProcessEnvironment(QProcessEnvironment)，
+        # 老式 setEnvironment(QStringList) 不存在，
+        # 调了就是 AttributeError → 闪退（踩过的坑）。
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUNBUFFERED", "1")
+        self.process.setProcessEnvironment(env)
 
         self.process.readyReadStandardOutput.connect(
             self.on_read
@@ -596,12 +721,23 @@ class MainWindow(QMainWindow):
 
         self._set_running_ui(True)
 
+        # 用 pythonw.exe 跑子进程，避免闪黑窗
+        child_python = windowless_python(
+            self.python_exe
+        )
+
+        log_event(
+            f"启动子进程: {child_python} {script}"
+        )
+
         self.process.start(
-            self.python_exe, [script]
+            child_python, [script]
         )
 
     @staticmethod
     def _with_env(env, key, value):
+
+        """（已弃用，保留兼容；环境设置见 start_scan）"""
 
         prefix = key + "="
 
@@ -618,6 +754,7 @@ class MainWindow(QMainWindow):
     # 读取子进程输出
     # --------------------------------------------------------
 
+    @guarded
     def on_read(self):
 
         data = bytes(
@@ -682,11 +819,13 @@ class MainWindow(QMainWindow):
     # 等待 input() 时：点「继续」= 按回车
     # --------------------------------------------------------
 
+    @guarded
     def send_enter(self):
 
         if self.process is not None:
             self.process.write(b"\n")
 
+    @guarded
     def stop_scan(self):
 
         if self.process is None:
@@ -704,7 +843,13 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             self.process.kill()
 
+    @guarded
     def on_scan_finished(self):
+
+        log_event(
+            f"on_scan_finished: kind="
+            f"{getattr(self, '_scan_kind', '?')}"
+        )
 
         # 缓冲区里可能还有半行
         if self._line_buffer.strip():
@@ -758,6 +903,7 @@ class MainWindow(QMainWindow):
     # 打开 Excel
     # ========================================================
 
+    @guarded
     def open_excel(self):
 
         if not os.path.exists(self.excel_path):
@@ -774,6 +920,7 @@ class MainWindow(QMainWindow):
     # Git
     # ========================================================
 
+    @guarded
     def refresh_git_status(self):
 
         if self.git_worker is not None:
@@ -790,6 +937,7 @@ class MainWindow(QMainWindow):
 
         self._run_git(steps, self._on_status_done)
 
+    @guarded
     def _on_status_done(self, rc, text):
 
         lines = [
@@ -812,6 +960,7 @@ class MainWindow(QMainWindow):
             f"未提交改动：{changes} 个文件"
         )
 
+    @guarded
     def commit_and_push(self):
 
         if self.git_worker is not None:
@@ -880,6 +1029,7 @@ class MainWindow(QMainWindow):
             lambda rc, text: self._on_commit_done(rc),
         )
 
+    @guarded
     def _on_commit_done(self, rc):
 
         if rc == 0:
@@ -971,10 +1121,27 @@ class MainWindow(QMainWindow):
 
 def main():
 
+    # 硬崩溃（C++ 段错误）也留痕迹
+    handle = _get_log()
+
+    if handle is not None:
+        faulthandler.enable(handle)
+
+    log_event("=== 程序启动 ===")
+
+    # 最后一道防线：任何漏网异常都写日志
+    def excepthook(exc_type, exc_value, exc_tb):
+
+        log_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = excepthook
+
     app = QApplication(sys.argv)
 
     window = MainWindow()
     window.show()
+
+    log_event("进入事件循环")
 
     sys.exit(app.exec_())
 

@@ -6,3 +6,6 @@
 
 # Python 缓存
 __pycache__/
+
+# GUI 崩溃日志
+scan_gui_error.log
