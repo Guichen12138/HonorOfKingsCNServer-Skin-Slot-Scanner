@@ -283,8 +283,46 @@ def scan_hero(hero_id):
     failed = 0
 
 
+    # ================================================================
+    # 先探测 00 原皮槽，空号英雄直接跳过剩余槽位
+    #
+    # 依据：任何英雄上线必然带原皮（00 槽），
+    # 现有 139 个英雄的起始槽全部是 00，无一例外。
+    # 00 槽 404 → 这个英雄编号不存在 → 后面 19 个请求全是白打。
+    #
+    # 2026-09-14 改造后请求量：
+    #   19980 → 约 3640（存在英雄×20 + 空号×1），降幅 82%。
+    #
+    # 注意：00 槽「请求失败」（429/5xx/超时重试用完）
+    # 不能当成空号，会保守地继续扫完这个英雄，
+    # 防止把真实英雄误判成不存在。
+    # ================================================================
+
+    first = check_skin(
+        hero_id,
+        SKIN_START
+    )
+
+    if first["exists"]:
+
+        results.append(first)
+
+    elif first.get("failed"):
+
+        # 00 槽请求失败：不断定英雄不存在，
+        # 继续扫完整个英雄，按原逻辑统计失败数
+
+        failed += 1
+
+    else:
+
+        # 00 槽 404：英雄编号不存在，跳过剩余槽位
+
+        return hero_id, results, failed
+
+
     for skin_id in range(
-        SKIN_START,
+        SKIN_START + 1,
         SKIN_END + 1
     ):
 
@@ -557,6 +595,9 @@ def main():
     # 整个英雄任务崩掉的数量
     scan_errors = 0
 
+    # 00 槽 404、被直接跳过的空号英雄数量
+    skipped_heroes = 0
+
     # 是否被 Ctrl+C 手动中断
     interrupted = False
 
@@ -614,6 +655,12 @@ def main():
                 all_results[
                     hero_id
                 ] = results
+
+            elif not failed:
+
+                # 00 槽 404、无任何失败：空号英雄，被跳过
+
+                skipped_heroes += 1
 
 
             print(
@@ -920,6 +967,11 @@ def main():
     print(
         f"新增英雄："
         f"{new_heroes}"
+    )
+
+    print(
+        f"跳过空号英雄："
+        f"{skipped_heroes}"
     )
 
     print(
