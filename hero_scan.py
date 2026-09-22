@@ -360,6 +360,8 @@ def main():
 
     if os.path.exists(EXCEL_FILE):
 
+        excel_existed = True
+
         print(
             f"发现已有 Excel：{EXCEL_FILE}"
         )
@@ -379,6 +381,8 @@ def main():
         )
 
     else:
+
+        excel_existed = False
 
         print(
             "没有找到 Excel，正在创建新的文件……"
@@ -943,11 +947,34 @@ def main():
 
     # ========================================================
     # 保存
+    #
+    # 数据没有变化时跳过保存：
+    # openpyxl 每次 save 都会重新打包整个 xlsx，
+    # 即使内容一字不差，文件字节也会变，
+    # git 就会一直误报「Excel 有未提交的修改」。
+    # 只有真正有新增/更新，或文件是本次新建的，才落盘。
     # ========================================================
 
-    wb.save(
-        EXCEL_FILE
+    has_changes = (
+        new_heroes
+        or new_records
+        or updated_records
     )
+
+    if has_changes or not excel_existed:
+
+        wb.save(
+            EXCEL_FILE
+        )
+
+    else:
+
+        print(
+            "数据无变化，跳过写入 Excel，"
+            "git 不会再误报文件改动。"
+        )
+
+        print()
 
 
     # ========================================================
