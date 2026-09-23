@@ -835,12 +835,18 @@ def main():
             # ============================================================
             # Last-Modified：
             # 每次都以服务器最新返回值为准
+            #
+            # 除了值不同要更新外，
+            # 如果旧格子不是字符串类型（比如在 Excel/WPS 里被重新
+            # 输入过、变成了真日期单元格），也强制重写回标准字符串，
+            # 让显示格式和其他格子保持一致。
             # ============================================================
 
             if last_modified:
 
                 if (
                         old_time is None
+                        or not isinstance(old_time, str)
                         or str(old_time).strip() != str(last_modified).strip()
                 ):
                     time_cell = ws.cell(
@@ -848,6 +854,12 @@ def main():
                         column=time_col,
                         value=last_modified
                     )
+
+                    # 文本格式（@）：
+                    # 即使之后在 Excel/WPS 里重新输入这个格子，
+                    # 也保持文本，不会被自动转成日期格式
+
+                    time_cell.number_format = "@"
 
                     name_cell = ws.cell(
                         row=row,
