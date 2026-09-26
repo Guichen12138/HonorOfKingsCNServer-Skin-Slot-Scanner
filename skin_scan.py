@@ -2,18 +2,15 @@ import openpyxl
 import webbrowser
 import os
 
-
-# ============================================================
-# 配置
-# ============================================================
-
-EXCEL_FILE = "hero_skin_scan.xlsx"
-
-BASE_URL = "https://image.smoba.qq.com/Picture/HeroOriginalPainting/"
-
-# 皮肤格子：00 ~ 19
-SKIN_START = 0
-SKIN_END = 19
+# 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装
+# （common.py 和本脚本在同一目录，Python 会自动找到）
+from common import (
+    EXCEL_FILE,
+    SKIN_START,
+    SKIN_END,
+    parse_header_columns,
+    skin_image_url,
+)
 
 
 # ============================================================
@@ -44,63 +41,7 @@ ws = wb.active
 # 找到各个 Last-Modified 和皮肤名列
 # ============================================================
 
-last_modified_columns = {}
-skin_name_columns = {}
-
-for col in range(
-    1,
-    ws.max_column + 1
-):
-
-    header = ws.cell(
-        row=1,
-        column=col
-    ).value
-
-    if not header:
-        continue
-
-    header = str(header)
-
-
-    # --------------------------------------------------------
-    # Last-Modified
-    # --------------------------------------------------------
-
-    if header.endswith("-Last-Modified"):
-
-        try:
-
-            skin_id = int(
-                header.split("-")[0]
-            )
-
-            last_modified_columns[
-                skin_id
-            ] = col
-
-        except ValueError:
-            pass
-
-
-    # --------------------------------------------------------
-    # 皮肤名
-    # --------------------------------------------------------
-
-    elif header.endswith("-皮肤名"):
-
-        try:
-
-            skin_id = int(
-                header.split("-")[0]
-            )
-
-            skin_name_columns[
-                skin_id
-            ] = col
-
-        except ValueError:
-            pass
+skin_name_columns, last_modified_columns = parse_header_columns(ws)
 
 
 # ============================================================
@@ -217,13 +158,7 @@ for row in range(
         # → 需要打开
         # ----------------------------------------------------
 
-        filename = (
-            f"30{hero_id:03d}"
-            f"{skin_id:02d}"
-            ".jpg"
-        )
-
-        url = BASE_URL + filename
+        url = skin_image_url(hero_id, skin_id)
 
 
         skins_to_open.append({

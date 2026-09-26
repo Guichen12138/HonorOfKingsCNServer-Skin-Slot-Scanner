@@ -2,6 +2,8 @@ import requests
 import concurrent.futures
 import threading
 import time
+import json
+import random
 import os
 from email.utils import parsedate_to_datetime
 from datetime import timezone, timedelta
@@ -10,22 +12,24 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
+# 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装
+# （common.py 和本脚本在同一目录，Python 会自动找到）
+from common import (
+    EXCEL_FILE,
+    SKIN_START,
+    SKIN_END,
+    parse_header_columns,
+    skin_image_url,
+)
+
 
 # ============================================================
 # 配置
 # ============================================================
 
-EXCEL_FILE = "hero_skin_scan.xlsx"
-
-BASE_URL = "https://image.smoba.qq.com/Picture/HeroOriginalPainting/"
-
 # 英雄编号范围
 HERO_START = 1
 HERO_END = 999
-
-# 每个英雄扫描 00 ~ 19
-SKIN_START = 0
-SKIN_END = 19
 
 # 并发线程
 #
@@ -51,12 +55,19 @@ RETRY_DELAY = 0.5
 #
 # 每一轮扫描使用同一个值，让它不重复、但整轮保持一致。
 #
-# 作用：这一轮的请求不会命中上一轮留在 CDN 边缘节点上的过期缓存。
+# 2026-09-26 起只在重试时带上它：
 #
-# 关键点在于「过期的 404」：
+# 之前所有请求都带 ?_=时间戳，等于每次扫描都全量回源，
+# CDN 忙的时候（中午）一轮要 18~20 秒，深夜只要 8~10 秒。
+# 现在首次请求不带标记，让边缘节点正常命中（快且稳定）；
+# 只有重试（404 确认 / 429 / 5xx / 无 Last-Modified）才带上，
+# 强制回源拿最新结果。
+#
+# 保留这个标记的初衷不变，关键点在于「过期的 404」：
 # 资源还没上线时扫出来的是 404，边缘节点会把这个 404 缓存下来；
 # 等资源真正上传之后，边缘节点可能还在给旧的 404，
 # 于是这个最新的资源就一直扫不到，Last-Modified 也就一直写不进去。
+# 对应的处理见 check_skin 里的 404 分支。
 # --------------------------------------------------------------------
 
 CACHE_BUSTER = str(int(time.time() * 1000))
@@ -90,18 +101,111 @@ def get_session():
 
 
 # ============================================================
+# 全局 429 冷却（重试风暴的刹车）
+#
+# 之前每个线程撞到 429 后各睡各的（固定递增延时），
+# 192 个线程几乎同时睡醒、同时重试，
+# 刚缓过来的 CDN 立刻又被压垮，形成重试风暴。
+#
+# 现在任何线程撞到 429，就全局推后一个冷却窗口；
+# 所有线程发请求前先看一眼，窗口没过就先等。
+# ============================================================
+
+_throttle_lock = threading.Lock()
+
+# 冷却截止时刻（time.monotonic() 秒）
+_throttle_until = 0.0
+
+
+def _note_429():
+
+    global _throttle_until
+
+    with _throttle_lock:
+
+        _throttle_until = max(
+            _throttle_until,
+            time.monotonic() + 1.0
+        )
+
+
+def _wait_throttle():
+
+    while True:
+
+        with _throttle_lock:
+
+            wait = (
+                _throttle_until
+                - time.monotonic()
+            )
+
+        if wait <= 0:
+
+            return
+
+        time.sleep(
+            min(wait, 0.5)
+        )
+
+
+# ============================================================
+# 判断一个 404 响应是不是可能来自边缘节点的旧缓存
+#
+# 腾讯 CDN 的标记头是 X-Cache-Lookup，而且常常多段连在一起：
+#   "Cache Hit, Hit From Inner Cluster, Cache Miss"
+# 只要里面出现过 Cache Miss，说明这条链路上刚回源过，
+# 这个 404 就是源头当前的真实答案，不用再确认；
+# 只有全是 Hit 时才可能是「过期的 404」，需要带 buster 回源确认。
+#
+# 兼容其他 CDN 的标准 X-Cache / Age 头；
+# 什么线索都没有时保守当成缓存，宁可多确认一次。
+# ============================================================
+
+def _may_be_stale_cache(response):
+
+    lookup = (
+        response.headers.get("X-Cache-Lookup")
+        or ""
+    )
+
+    if lookup:
+
+        return "MISS" not in lookup.upper()
+
+    x_cache = (
+        response.headers.get("X-Cache")
+        or ""
+    ).upper()
+
+    if x_cache:
+
+        if "MISS" in x_cache:
+
+            return False
+
+        if "HIT" in x_cache:
+
+            return True
+
+    age = response.headers.get("Age")
+
+    try:
+
+        return int(age) > 0
+
+    except (TypeError, ValueError):
+
+        return True
+
+
+# ============================================================
 # 检查单个资源
 # ============================================================
 
 def check_skin(hero_id, skin_id):
 
-    filename = (
-        f"30{hero_id:03d}"
-        f"{skin_id:02d}"
-        ".jpg"
-    )
-
-    url = BASE_URL + filename
+    url = skin_image_url(hero_id, skin_id)
 
 
     # ================================================================
@@ -120,6 +224,10 @@ def check_skin(hero_id, skin_id):
         RETRIES + 1
     ):
 
+        # 有线程撞到 429 时全局正在冷却，
+        # 先等一等再发，别火上浇油
+        _wait_throttle()
+
         try:
 
             session = get_session()
@@ -129,9 +237,15 @@ def check_skin(hero_id, skin_id):
                 timeout=TIMEOUT,
                 allow_redirects=True,
                 stream=True,
-                params={
-                    "_": CACHE_BUSTER
-                }
+
+                # 首次请求不带缓存标记，
+                # 让边缘节点正常命中（快且不受 CDN 忙时影响）；
+                # 重试才带上，强制回源拿最新结果
+                params=(
+                    {"_": CACHE_BUSTER}
+                    if attempt > 1
+                    else None
+                ),
             )
 
             try:
@@ -159,8 +273,16 @@ def check_skin(hero_id, skin_id):
                         # 这正是之前扫描慢的主要原因
                         response.content
 
+                        # 429 记入全局冷却窗口，
+                        # 让所有线程都缓一缓再发
+                        if status == 429:
+                            _note_429()
+
+                        # 抖动：把 192 个线程的重试时刻错开，
+                        # 不要同时睡醒、同时打回去
                         time.sleep(
                             RETRY_DELAY * attempt
+                            + random.uniform(0.1, 0.6)
                         )
 
                         continue
@@ -186,6 +308,22 @@ def check_skin(hero_id, skin_id):
                     # 让连接可以复用给下一个请求
                     response.content
 
+                    # ------------------------------------------------
+                    # 「过期的 404」确认（2026-09-26 起只在 404 时做）：
+                    #
+                    # 首次 404 且响应可能来自边缘缓存时，
+                    # 带 buster 强制回源再确认一次；
+                    # X-Cache: MISS 说明刚回源，404 可信，
+                    # 空号英雄不用白打第二个请求。
+                    # ------------------------------------------------
+
+                    if (
+                            status == 404
+                            and attempt == 1
+                            and _may_be_stale_cache(response)
+                    ):
+                        continue
+
                     return {
                         "hero_id": hero_id,
                         "skin_id": skin_id,
@@ -210,6 +348,7 @@ def check_skin(hero_id, skin_id):
 
                     time.sleep(
                         RETRY_DELAY * attempt
+                        + random.uniform(0.1, 0.6)
                     )
 
                     continue
@@ -254,6 +393,7 @@ def check_skin(hero_id, skin_id):
 
                 time.sleep(
                     RETRY_DELAY * attempt
+                    + random.uniform(0.1, 0.6)
                 )
 
                 continue
@@ -343,6 +483,70 @@ def scan_hero(hero_id):
 
 
 # ============================================================
+# 官网英雄列表（英雄名自动填充用）
+#
+# ename 就是本工具用的英雄编号，cname 是官方英雄名。
+# 编号体系已用全表手输名字比对验证（2026-09-25，95%+ 一致；
+# 少数不一致全是手输名的笔误/注记，本功能只填空格，不受影响）。
+# ============================================================
+
+HERO_LIST_URL = "https://pvp.qq.com/web201605/js/herolist.json"
+
+
+def fetch_official_hero_names():
+
+    """
+    拉官网英雄列表，返回 {英雄编号: 官方英雄名}。
+
+    任何失败都返回空 dict：
+    自动填充是锦上添花，不能影响扫描主流程。
+    """
+
+    try:
+
+        response = requests.get(
+            HERO_LIST_URL,
+            timeout=TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+
+        response.raise_for_status()
+
+        content = response.content
+
+        try:
+            data = json.loads(content.decode("utf-8"))
+
+        except UnicodeDecodeError:
+            data = json.loads(content.decode("gbk"))
+
+        names = {}
+
+        for item in data:
+
+            try:
+
+                names[
+                    int(item["ename"])
+                ] = str(item["cname"]).strip()
+
+            except (KeyError, TypeError, ValueError):
+
+                continue
+
+        return names
+
+    except Exception as exc:
+
+        print(
+            f"官网英雄列表获取失败，"
+            f"本次跳过英雄名自动填充：{exc}"
+        )
+
+        return {}
+
+
+# ============================================================
 # 主程序
 # ============================================================
 
@@ -416,68 +620,7 @@ def main():
     # 获取已有列
     # ========================================================
 
-    skin_name_columns = {}
-    last_modified_columns = {}
-
-
-    for col in range(
-        1,
-        ws.max_column + 1
-    ):
-
-        header = ws.cell(
-            row=1,
-            column=col
-        ).value
-
-        if not header:
-            continue
-
-        header = str(header)
-
-
-        # ----------------------------------------------------
-        # 皮肤名
-        # ----------------------------------------------------
-
-        if header.endswith("-皮肤名"):
-
-            try:
-
-                skin_id = int(
-                    header.split("-")[0]
-                )
-
-                skin_name_columns[
-                    skin_id
-                ] = col
-
-            except ValueError:
-
-                pass
-
-
-        # ----------------------------------------------------
-        # Last-Modified
-        # ----------------------------------------------------
-
-        elif header.endswith(
-            "-Last-Modified"
-        ):
-
-            try:
-
-                skin_id = int(
-                    header.split("-")[0]
-                )
-
-                last_modified_columns[
-                    skin_id
-                ] = col
-
-            except ValueError:
-
-                pass
+    skin_name_columns, last_modified_columns = parse_header_columns(ws)
 
 
     # ========================================================
@@ -884,6 +1027,83 @@ def main():
 
 
     # ========================================================
+    # 英雄名自动填充（官网英雄列表）
+    #
+    # 只填空格，已有名字一个都不碰；
+    # 只填扫到过资源的英雄行，
+    # 编号还没上线的空行不填。
+    # ========================================================
+
+    auto_named = 0
+
+    official_names = fetch_official_hero_names()
+
+    # 00 槽的 Last-Modified 列：
+    # 有值说明这个编号真实存在
+    first_time_col = (
+        last_modified_columns.get(SKIN_START)
+        if official_names
+        else None
+    )
+
+    if official_names and first_time_col is not None:
+
+        for row in range(
+            2,
+            ws.max_row + 1
+        ):
+
+            hero_id = ws.cell(
+                row=row,
+                column=1
+            ).value
+
+            if hero_id is None:
+                continue
+
+            try:
+
+                hero_id = int(hero_id)
+
+            except (TypeError, ValueError):
+
+                continue
+
+            # 没扫到过任何资源的行：
+            # 编号未上线的占位行，不填
+            if not ws.cell(
+                row=row,
+                column=first_time_col
+            ).value:
+                continue
+
+            name_cell = ws.cell(
+                row=row,
+                column=2
+            )
+
+            # 已有名字一律不碰
+            if (
+                name_cell.value is not None
+                and str(name_cell.value).strip() != ""
+            ):
+                continue
+
+            official_name = official_names.get(
+                hero_id
+            )
+
+            if official_name:
+
+                name_cell.value = official_name
+
+                # 和机器写入的其他格子一样的填充色，
+                # 方便一眼看出哪些名字是自动填的
+                name_cell.fill = cell_fill
+
+                auto_named += 1
+
+    # ========================================================
     # 样式
     # ========================================================
 
@@ -971,6 +1191,7 @@ def main():
         new_heroes
         or new_records
         or updated_records
+        or auto_named
     )
 
     if has_changes or not excel_existed:
@@ -1006,6 +1227,11 @@ def main():
     print(
         f"新增英雄："
         f"{new_heroes}"
+    )
+
+    print(
+        f"自动填充英雄名："
+        f"{auto_named}"
     )
 
     print(
