@@ -10,6 +10,7 @@ from common import (
     SKIN_END,
     parse_header_columns,
     skin_image_url,
+    pause,
 )
 
 
@@ -21,7 +22,7 @@ if not os.path.exists(EXCEL_FILE):
 
     print(f"找不到 Excel 文件：{EXCEL_FILE}")
 
-    input("按回车退出...")
+    pause()
     exit()
 
 
@@ -201,52 +202,28 @@ heroes.sort(
 
 print("=" * 70)
 
-print("王者荣耀英雄原画查看器")
-
-print("=" * 70)
-
-print()
-
 print(
-    f"Excel 中共有 "
-    f"{total_hero_count} 个英雄"
+    f"王者荣耀英雄原画查看器："
+    f"Excel 共 {total_hero_count} 个英雄，"
+    f"{len(heroes)} 个英雄有待处理的海报"
 )
-
-print(
-    f"还有 {len(heroes)} 个英雄存在未处理的海报"
-)
-
-print()
-
-print(
-    "每个英雄的海报会自动打开，"
-    "处理完当前英雄后，"
-    "按一次回车进入下一个英雄。"
-)
-
-print()
 
 print("=" * 70)
 
 
 # ============================================================
 # 没有需要处理的英雄：直接结束
+# （GUI 里 pause 会跳过，输出完立即退出）
 # ============================================================
 
 if not heroes:
-
-    print()
 
     print(
         "没有需要处理的英雄，"
         "所有海报都已填写皮肤名。"
     )
 
-    print()
-
-    input(
-        "按回车退出..."
-    )
+    pause()
 
     exit()
 
@@ -272,19 +249,10 @@ try:
         skins = hero["skins"]
 
 
-        print()
-
-        print("-" * 70)
-
         print(
             f"[{index + 1}/{len(heroes)}] "
-            f"{hero_id:03d} {hero_name}"
-        )
-
-        print()
-
-        print(
-            "本次需要查看的格子："
+            f"{hero_id:03d} {hero_name}  "
+            "待查看格子："
             + " ".join(
                 f"{skin['skin_id']:02d}"
                 for skin in skins
@@ -295,16 +263,6 @@ try:
         # ========================================================
         # 直接打开当前英雄未处理的海报
         # ========================================================
-
-        print()
-
-        print(
-            f"正在打开 "
-            f"{hero_id:03d} {hero_name} ..."
-        )
-
-        print()
-
 
         for skin in skins:
 
@@ -318,31 +276,34 @@ try:
             )
 
 
-        print()
-
         print(
-            f"{hero_id:03d} {hero_name} "
-            f"的未处理海报已全部打开。"
+            f"{hero_name} 的 "
+            f"{len(skins)} 张未处理海报已打开。"
         )
 
 
         # ========================================================
         # 等待用户处理完当前英雄
+        #
+        # 提示用 print 先发出来：input 的提示词走管道
+        # 不会实时显示，还会和下一段输出粘在同一行，
+        # 所以 input() 本身不带提示词
         # ========================================================
 
         if index < len(heroes) - 1:
 
-            input(
-                "\n处理完当前英雄后，"
-                "按回车进入下一个英雄..."
+            print(
+                "在 Excel 里填好皮肤名，"
+                "然后按回车（GUI 里点「继续」）"
+                "进入下一个英雄。"
             )
+
+            input()
 
 
 except KeyboardInterrupt:
 
     interrupted = True
-
-    print()
 
     print(
         "已手动中断，"
@@ -354,10 +315,6 @@ except KeyboardInterrupt:
 # 完成
 # ============================================================
 
-print()
-
-print("=" * 70)
-
 if interrupted:
 
     print(
@@ -368,16 +325,8 @@ if interrupted:
 else:
 
     print(
-        "所有未处理的英雄海报已经查看完成。"
+        f"全部 {len(heroes)} 个英雄的"
+        f"海报已查看完成。"
     )
 
-print("=" * 70)
-
-try:
-
-    input(
-        "按回车退出..."
-    )
-
-except KeyboardInterrupt:
-    pass
+pause()

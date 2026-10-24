@@ -555,7 +555,6 @@ def main():
     print("=" * 70)
     print("王者荣耀 HeroOriginalPainting 增量扫描器")
     print("=" * 70)
-    print()
 
 
     # ========================================================
@@ -567,11 +566,8 @@ def main():
         excel_existed = True
 
         print(
-            f"发现已有 Excel：{EXCEL_FILE}"
-        )
-
-        print(
-            "正在读取已有数据……"
+            f"发现已有 Excel：{EXCEL_FILE}，"
+            "已有数据将被保留。"
         )
 
         wb = load_workbook(
@@ -579,10 +575,6 @@ def main():
         )
 
         ws = wb.active
-
-        print(
-            "已有数据将被保留，不会初始化覆盖。"
-        )
 
     else:
 
@@ -703,26 +695,11 @@ def main():
             pass
 
 
-    print()
-
     print(
-        f"Excel 中已有 "
-        f"{len(hero_rows)} 个英雄。"
+        f"Excel 中已有 {len(hero_rows)} 个英雄，"
+        f"本次扫描 {HERO_START:03d}~{HERO_END:03d} 号、"
+        f"皮肤槽 {SKIN_START:02d}~{SKIN_END:02d}。"
     )
-
-    print()
-
-    print(
-        f"本次扫描英雄："
-        f"{HERO_START:03d} ~ {HERO_END:03d}"
-    )
-
-    print(
-        f"本次扫描皮肤槽："
-        f"{SKIN_START:02d} ~ {SKIN_END:02d}"
-    )
-
-    print()
 
     # ========================================================
     # 开始扫描
@@ -838,17 +815,15 @@ def main():
         executor.shutdown(wait=True)
 
 
-    print()
+    # 这个换行不能删：进度行用 \r 刷新、末尾没有换行，
+    # 少了它下一段文字会和进度文本粘成一行、被当成进度吞掉
     print()
 
     if interrupted:
 
         print(
             f"已手动中断：本次只扫完 "
-            f"{completed}/{total_heroes} 个英雄。"
-        )
-
-        print(
+            f"{completed}/{total_heroes} 个英雄，"
             "已扫完的部分会照常保存，"
             "建议之后完整重跑一次。"
         )
@@ -858,8 +833,6 @@ def main():
         print(
             "扫描完成，开始更新 Excel……"
         )
-
-    print()
 
 
     # ========================================================
@@ -1203,11 +1176,8 @@ def main():
     else:
 
         print(
-            "数据无变化，跳过写入 Excel，"
-            "git 不会再误报文件改动。"
+            "数据无变化，跳过写入 Excel。"
         )
-
-        print()
 
 
     # ========================================================
@@ -1217,70 +1187,33 @@ def main():
     print("=" * 70)
 
     print(
-        "更新完成！"
+        f"更新完成！新增英雄 {new_heroes} · "
+        f"自动填充英雄名 {auto_named} · "
+        f"跳过空号英雄 {skipped_heroes}"
+    )
+
+    print(
+        f"新增 Last-Modified {new_records} · "
+        f"更新 Last-Modified {updated_records}"
     )
 
     print("=" * 70)
-
-    print()
-
-    print(
-        f"新增英雄："
-        f"{new_heroes}"
-    )
-
-    print(
-        f"自动填充英雄名："
-        f"{auto_named}"
-    )
-
-    print(
-        f"跳过空号英雄："
-        f"{skipped_heroes}"
-    )
-
-    print(
-        f"新增 Last-Modified："
-        f"{new_records}"
-    )
-
-    print(
-        f"更新 Last-Modified："
-        f"{updated_records}"
-    )
-
-    print()
 
     if total_failed or scan_errors:
 
         print(
             f"注意：{total_failed} 个请求、"
             f"{scan_errors} 个英雄任务失败，"
-            f"这些格子本次没有扫到。"
-        )
-
-        print(
+            f"这些格子本次没有扫到，"
             "建议再完整跑一次补齐。"
         )
 
-        print()
-
     print(
         f"Excel：{EXCEL_FILE}"
-    )
-
-    print()
-
-    print(
-        "已有皮肤名不会被修改。"
-    )
-
-    print(
+        "（已有皮肤名不会被修改；"
         "已有 Last-Modified 以服务器最新值为准，"
-        "有更新会自动刷新并高亮。"
+        "有更新会自动刷新并高亮）"
     )
-
-    print()
 
 
 if __name__ == "__main__":
