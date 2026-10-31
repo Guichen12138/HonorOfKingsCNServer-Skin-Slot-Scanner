@@ -4,6 +4,7 @@ import threading
 import time
 import json
 import random
+import subprocess
 import os
 from email.utils import parsedate_to_datetime
 from datetime import timezone, timedelta
@@ -15,6 +16,7 @@ from openpyxl.utils import get_column_letter
 # 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装
 # （common.py 和本脚本在同一目录，Python 会自动找到）
 from common import (
+    APP_DIR,
     EXCEL_FILE,
     SKIN_START,
     SKIN_END,
@@ -71,6 +73,24 @@ RETRY_DELAY = 0.5
 # --------------------------------------------------------------------
 
 CACHE_BUSTER = str(int(time.time() * 1000))
+
+
+# --------------------------------------------------------------------
+# C# 扫描引擎
+#
+# 同目录的 hero_scan_cs.exe（.NET 9 self-contained，无需装运行时）
+# 跑同样的扫描，实测吞吐是 requests 多线程的 6~15 倍
+# （数据见 speed_test/REPORT.md：瓶颈在 Python 线程 + GIL，不在 CDN）。
+#
+# exe 存在就优先用它；不存在或启动失败时退回下面的
+# requests 多线程方案。两条路径产出同样的结果结构，
+# 后面更新 Excel 的逻辑完全共用，原版行为原样保留。
+# --------------------------------------------------------------------
+
+CS_EXE = os.path.join(APP_DIR, "hero_scan_cs.exe")
+
+# C# 引擎的并发连接数（speed_test 实测 512 是性价比点）
+CS_THREADS = 512
 
 
 # ============================================================
@@ -547,6 +567,143 @@ def fetch_official_hero_names():
 
 
 # ============================================================
+# C# 引擎：拉起 hero_scan_cs.exe 并按英雄收结果
+# ============================================================
+
+def scan_with_cs(total_heroes):
+
+    """
+    调用同目录的 hero_scan_cs.exe 扫描。
+
+    exe 每完成一个英雄就往 stdout 吐一行 JSON：
+        {"hero_id": 105, "failed": 0,
+         "results": [{"skin_id": 0, "lm": "2020-04-26 11:44:26"}, ...]}
+    results 只含实际存在的格子。Python 边读边打进度条，
+    组装出和 requests 版完全一样的 all_results 结构。
+
+    中断说明：GUI 点「中断」杀掉的是本脚本，exe 会作为
+    孤儿进程把剩余请求扫完（全程只要 2~3 秒），但它只输出
+    不落盘——Excel 仍然只在这里保存，不会有任何副作用。
+    """
+
+    all_results = {}
+    total_failed = 0
+    scan_errors = 0
+    skipped_heroes = 0
+    completed = 0
+    interrupted = False
+
+    # stderr 落文件而不是管道：
+    # 一边读 stdout 一边让 stderr 积在管道里有死锁风险
+    stderr_path = os.path.join(APP_DIR, "hero_scan_cs_error.log")
+
+    with open(stderr_path, "a", encoding="utf-8") as stderr_fh:
+
+        proc = subprocess.Popen(
+            [
+                CS_EXE,
+                str(HERO_START),
+                str(HERO_END),
+                str(CS_THREADS),
+                str(SKIN_START),
+                str(SKIN_END),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=stderr_fh,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=APP_DIR,
+            # pythonw 没有控制台，不加这个标志的话
+            # 控制台子系统子进程每次运行都会闪一个黑窗
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW
+                if os.name == "nt"
+                else 0
+            ),
+        )
+
+        try:
+
+            for line in proc.stdout:
+
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    record = json.loads(line)
+                except ValueError:
+
+                    # 这一行不是合法 JSON：
+                    # 这个英雄的结果丢了，记一笔继续
+                    scan_errors += 1
+                    continue
+
+                if "hero_id" not in record:
+                    continue
+
+                hero_id = record["hero_id"]
+                failed = record.get("failed", 0)
+
+                results = [
+                    {
+                        "skin_id": item["skin_id"],
+                        "last_modified": item["lm"],
+                        "exists": True,
+                    }
+                    for item in record.get("results", [])
+                ]
+
+                completed += 1
+                total_failed += failed
+
+                if results:
+                    all_results[hero_id] = results
+                elif not failed:
+                    # 00 槽 404、无任何失败：空号英雄，被跳过
+                    skipped_heroes += 1
+
+                print(
+                    f"\r扫描进度："
+                    f"{completed}/{total_heroes}",
+                    end="",
+                    flush=True
+                )
+
+        except KeyboardInterrupt:
+
+            interrupted = True
+            proc.terminate()
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    if proc.returncode not in (0, None) and not interrupted:
+
+        print()
+
+        print(
+            f"注意：C# 引擎异常退出"
+            f"（返回码 {proc.returncode}，"
+            f"详情见 hero_scan_cs_error.log），"
+            f"本次只完成 {completed}/{total_heroes} 个英雄。"
+        )
+
+    return (
+        all_results,
+        total_failed,
+        scan_errors,
+        skipped_heroes,
+        interrupted,
+        completed,
+    )
+
+
+# ============================================================
 # 主程序
 # ============================================================
 
@@ -726,93 +883,137 @@ def main():
     interrupted = False
 
 
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=THREADS
+    # ========================================================
+    # 引擎选择：有 hero_scan_cs.exe 就用 C#（快 6~15 倍），
+    # 没有或启动失败就退回 requests 多线程
+    # ========================================================
+
+    use_cs = os.path.exists(CS_EXE)
+
+    print(
+        "扫描引擎："
+        + (
+            "C#（hero_scan_cs.exe）"
+            if use_cs
+            else "Python 多线程"
+        )
     )
 
-    futures = {
-        executor.submit(
-            scan_hero,
-            hero_id
-        ): hero_id
-        for hero_id in range(
-            HERO_START,
-            HERO_END + 1
-        )
-    }
 
+    if use_cs:
 
-    completed = 0
+        try:
 
+            (
+                all_results,
+                total_failed,
+                scan_errors,
+                skipped_heroes,
+                interrupted,
+                completed,
+            ) = scan_with_cs(total_heroes)
 
-    try:
+        except OSError:
 
-        for future in concurrent.futures.as_completed(
-            futures
-        ):
-
-            # ------------------------------------------------
-            # 单个英雄的任务崩了，
-            # 记一笔继续跑，
-            # 不能让整轮扫描的结果全部丢掉
-            # ------------------------------------------------
-
-            try:
-
-                hero_id, results, failed = future.result()
-
-            except Exception:
-
-                scan_errors += 1
-
-                completed += 1
-
-                continue
-
-            completed += 1
-
-            total_failed += failed
-
-
-            if results:
-
-                all_results[
-                    hero_id
-                ] = results
-
-            elif not failed:
-
-                # 00 槽 404、无任何失败：空号英雄，被跳过
-
-                skipped_heroes += 1
-
+            # exe 在但拉不起来（损坏/被杀软拦截）：
+            # 降级到原版方案，扫描照常完成
+            use_cs = False
 
             print(
-                f"\r扫描进度："
-                f"{completed}/{total_heroes}",
-                end="",
-                flush=True
+                "C# 引擎启动失败，"
+                "改用 Python 多线程方案。"
             )
 
 
-    except KeyboardInterrupt:
+    if not use_cs:
 
-        # ------------------------------------------------
-        # Ctrl+C：取消还没开始的任务，
-        # 已扫完的部分照常保存，不白跑
-        # ------------------------------------------------
-
-        interrupted = True
-
-        executor.shutdown(
-            wait=False,
-            cancel_futures=True
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=THREADS
         )
 
+        futures = {
+            executor.submit(
+                scan_hero,
+                hero_id
+            ): hero_id
+            for hero_id in range(
+                HERO_START,
+                HERO_END + 1
+            )
+        }
 
-    else:
 
-        executor.shutdown(wait=True)
+        completed = 0
+
+
+        try:
+
+            for future in concurrent.futures.as_completed(
+                futures
+            ):
+
+                # ------------------------------------------------
+                # 单个英雄的任务崩了，
+                # 记一笔继续跑，
+                # 不能让整轮扫描的结果全部丢掉
+                # ------------------------------------------------
+
+                try:
+
+                    hero_id, results, failed = future.result()
+
+                except Exception:
+
+                    scan_errors += 1
+
+                    completed += 1
+
+                    continue
+
+                completed += 1
+
+                total_failed += failed
+
+
+                if results:
+
+                    all_results[
+                        hero_id
+                    ] = results
+
+                elif not failed:
+
+                    # 00 槽 404、无任何失败：空号英雄，被跳过
+
+                    skipped_heroes += 1
+
+
+                print(
+                    f"\r扫描进度："
+                    f"{completed}/{total_heroes}",
+                    end="",
+                    flush=True
+                )
+
+
+        except KeyboardInterrupt:
+
+            # ------------------------------------------------
+            # Ctrl+C：取消还没开始的任务，
+            # 已扫完的部分照常保存，不白跑
+            # ------------------------------------------------
+
+            interrupted = True
+
+            executor.shutdown(
+                wait=False,
+                cancel_futures=True
+            )
+
+
+        else:
+
+            executor.shutdown(wait=True)
 
 
     # 这个换行不能删：进度行用 \r 刷新、末尾没有换行，
