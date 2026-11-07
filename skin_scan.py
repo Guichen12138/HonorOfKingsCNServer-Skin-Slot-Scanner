@@ -13,6 +13,14 @@ from common import (
     pause,
 )
 
+# 海报增量保存是本机自用功能（poster_save.py 不进仓库）：
+# 仓库里没有这个文件时自动跳过保存，其余功能照常
+try:
+    from poster_save import save_poster
+except ImportError:
+    def save_poster(url):
+        pass
+
 
 # ============================================================
 # 检查 Excel
@@ -51,10 +59,19 @@ skin_name_columns, last_modified_columns = parse_header_columns(ws)
 
 heroes = []
 
+# Excel 里所有在服务器上存在的皮肤（含已命名的）：
+# 供海报全量重建用
+all_skins = []
+
 # 实际有效的英雄数量
 # （不直接用 ws.max_row - 1，
 #   那样会把中间或末尾的空行也算进去）
 total_hero_count = 0
+
+
+# 英雄数量按「原皮（00 槽）Last-Modified 有没有值」来算：
+# 空号英雄在表里也占一行，但那只是占位，不能算英雄
+first_lm_col = last_modified_columns.get(SKIN_START)
 
 
 for row in range(
@@ -85,6 +102,17 @@ for row in range(
 
     except ValueError:
 
+        continue
+
+    # 原皮列是空的 = 空号占位行：
+    # 不算英雄，也不用再扫它的槽位
+    if (
+        first_lm_col is not None
+        and not ws.cell(
+            row=row,
+            column=first_lm_col
+        ).value
+    ):
         continue
 
     total_hero_count += 1
@@ -135,6 +163,16 @@ for row in range(
         if not last_modified:
             continue
 
+        url = skin_image_url(hero_id, skin_id)
+
+        # 所有在服务器上存在的皮肤都记下来，
+        # 供海报全量重建使用
+        all_skins.append({
+            "hero_id": hero_id,
+            "skin_id": skin_id,
+            "url": url,
+        })
+
 
         # ----------------------------------------------------
         # 你是否已经填写过皮肤名字
@@ -158,9 +196,6 @@ for row in range(
         # 有资源 + 没填写名字
         # → 需要打开
         # ----------------------------------------------------
-
-        url = skin_image_url(hero_id, skin_id)
-
 
         skins_to_open.append({
             "skin_id": skin_id,
@@ -204,8 +239,9 @@ print("=" * 70)
 
 print(
     f"王者荣耀英雄原画查看器："
-    f"Excel 共 {total_hero_count} 个英雄，"
-    f"{len(heroes)} 个英雄有待处理的海报"
+    f"Excel 共 {total_hero_count} 个英雄、"
+    f"{len(all_skins)} 张海报，"
+    f"{len(heroes)} 个英雄有待处理"
 )
 
 print("=" * 70)
@@ -270,6 +306,10 @@ try:
                 f"{skin['skin_id']:02d} → "
                 f"{skin['url']}"
             )
+
+            # 打开浏览器前把这张海报的全画幅原图
+            # 存进海报文件夹（CDN 原名，同名覆盖 = 增量更新）
+            save_poster(skin["url"])
 
             webbrowser.open_new_tab(
                 skin["url"]

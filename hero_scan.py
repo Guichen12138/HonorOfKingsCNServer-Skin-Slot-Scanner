@@ -884,6 +884,23 @@ def main():
 
 
     # ========================================================
+    # 官网英雄名提前到后台拉取：
+    # 它和扫描互不依赖，扫描跑完时通常已经拿好，
+    # 不用再串行等一次网络往返
+    # ========================================================
+
+    official_names_holder = {}
+
+    official_thread = threading.Thread(
+        target=lambda: official_names_holder.update(
+            fetch_official_hero_names()
+        ),
+        daemon=True,
+    )
+
+    official_thread.start()
+
+    # ========================================================
     # 引擎选择：有 hero_scan_cs.exe 就用 C#（快 6~15 倍），
     # 没有或启动失败就退回 requests 多线程
     # ========================================================
@@ -1210,7 +1227,17 @@ def main():
 
     auto_named = 0
 
-    official_names = fetch_official_hero_names()
+    # 后台拉取的结果（多数时候扫描结束时早就拿到了）
+    official_thread.join(timeout=5)
+
+    if official_thread.is_alive():
+        # 网络卡住了：这次先不自动填名，别让它拖住保存
+        print(
+            "官网英雄名拉取超时，本次跳过自动填充。"
+        )
+        official_names = {}
+    else:
+        official_names = dict(official_names_holder)
 
     # 00 槽的 Last-Modified 列：
     # 有值说明这个编号真实存在
