@@ -21,7 +21,9 @@
 // 用 512 条 HTTP/1.1 连接能跑到现网的 9~15 倍。
 // ============================================================
 
+using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Headers;
 
 internal static class Program
@@ -41,21 +43,25 @@ internal static class Program
     static readonly string CacheBuster =
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
 
-    static readonly HttpClient Http = new HttpClient(new SocketsHttpHandler
-    {
-        MaxConnectionsPerServer = 512,
-        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        ConnectTimeout = TimeSpan.FromMilliseconds(TIMEOUT_MS),
-    })
-    {
-        Timeout = TimeSpan.FromMilliseconds(TIMEOUT_MS),
-    };
+    // 在 Main 里按并发参数构建（连接数要跟 threads 走）
+    static HttpClient Http = null!;
 
     // 429 全局冷却：任何线程撞到 429 就推后一个窗口，
     // 所有请求发出前先看一眼（对应 hero_scan.py 的 _note_429/_wait_throttle）
     static long _throttleUntilMs;
     static readonly object PrintLock = new();
     static readonly object ThrottleLock = new();
+
+    // --------------------------------------------------------
+    // 请求成分统计（跑完打到 stderr，用于定位瓶颈）
+    // --------------------------------------------------------
+
+    static long StatRequests;    // 发出的请求总数
+    static long StatOk200;       // 200 且带 Last-Modified
+    static long StatConfirm404;  // 边缘缓存的 404 → 带 buster 回源确认
+    static long StatFinal404;    // 最终判定不存在
+    static long StatRetries;     // 429/5xx/无LM/网络抖动的重试
+    static long StatFailed;      // 重试完仍失败
 
     // --------------------------------------------------------
     // 记录类型
@@ -75,6 +81,23 @@ internal static class Program
         int threads   = args.Length > 2 ? int.Parse(args[2]) : 512;
         int skinStart = args.Length > 3 ? int.Parse(args[3]) : 0;
         int skinEnd   = args.Length > 4 ? int.Parse(args[4]) : 19;
+        string ver    = args.Length > 5 ? args[5] : "h1";
+
+        var version = ver == "h2"
+            ? HttpVersion.Version20
+            : HttpVersion.Version11;
+
+        Http = new HttpClient(new SocketsHttpHandler
+        {
+            MaxConnectionsPerServer = threads,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            ConnectTimeout = TimeSpan.FromMilliseconds(TIMEOUT_MS),
+        })
+        {
+            Timeout = TimeSpan.FromMilliseconds(TIMEOUT_MS),
+            DefaultRequestVersion = version,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+        };
 
         Http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
         Http.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue
@@ -82,6 +105,34 @@ internal static class Program
             NoCache = true,
         };
         Http.DefaultRequestHeaders.Pragma.ParseAdd("no-cache");
+
+        // 连接预热（第 7 个参数传 warm 启用）：
+        // 先把 threads 条 TLS 连接建立好再开扫，
+        // 免得头一波请求全在等握手
+        bool warm = args.Length > 6 && args[6] == "warm";
+
+        if (warm)
+        {
+            var warmTasks = new Task[threads];
+            for (int i = 0; i < threads; i++)
+            {
+                warmTasks[i] = Task.Run(async () =>
+                {
+                    try
+                    {
+                        // 根路径响应很小，整读不伤连接复用
+                        using var resp = await Http.GetAsync(
+                            BaseUrl, HttpCompletionOption.ResponseHeadersRead);
+                        await resp.Content.LoadIntoBufferAsync(64 * 1024);
+                    }
+                    catch { }
+                });
+            }
+            try { Task.WaitAll(warmTasks); } catch { }
+            Console.Error.WriteLine("{\"warm\": true}");
+        }
+
+        var sw = Stopwatch.StartNew();
 
         var tasks = new Task[end - start + 1];
         for (int heroId = start; heroId <= end; heroId++)
@@ -103,6 +154,16 @@ internal static class Program
             Console.Error.WriteLine("hero task fault: " + ex.Message);
             return 1;
         }
+
+        sw.Stop();
+
+        // 请求成分汇总（stderr，供瓶颈分析）
+        Console.Error.WriteLine(
+            $"{{\"elapsed_s\": {sw.Elapsed.TotalSeconds:F2}, " +
+            $"\"requests\": {StatRequests}, \"ok200\": {StatOk200}, " +
+            $"\"confirm404\": {StatConfirm404}, \"final404\": {StatFinal404}, " +
+            $"\"retries\": {StatRetries}, \"failed\": {StatFailed}, " +
+            $"\"version\": \"{ver}\", \"threads\": {threads}}}");
 
         return 0;
     }
@@ -166,10 +227,15 @@ internal static class Program
                     : new Uri(url);
 
                 using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+                Interlocked.Increment(ref StatRequests);
                 response = await Http.SendAsync(
                     request, HttpCompletionOption.ResponseHeadersRead);
 
                 int status = (int)response.StatusCode;
+                if (status == 200)
+                {
+                    Interlocked.Increment(ref StatOk200);
+                }
 
                 // 429 / 5xx 是临时繁忙或限流，要重试；
                 // 其余非 200 才是真的不存在
@@ -179,9 +245,11 @@ internal static class Program
                     if (attempt < RETRIES)
                     {
                         if (status == 429) Note429();
+                        Interlocked.Increment(ref StatRetries);
                         await Task.Delay(DelayMs(attempt));
                         continue;
                     }
+                    Interlocked.Increment(ref StatFailed);
                     return new SkinResult(skinId, null, Failed: true);
                 }
 
@@ -194,8 +262,10 @@ internal static class Program
                     // 边缘缓存时，带 buster 强制回源再确认一次
                     if (status == 404 && attempt == 1 && stale)
                     {
+                        Interlocked.Increment(ref StatConfirm404);
                         continue;
                     }
+                    Interlocked.Increment(ref StatFinal404);
                     return new SkinResult(skinId, null, Failed: false);
                 }
 
@@ -205,6 +275,7 @@ internal static class Program
                 // 200 但没有 Last-Modified：响应不完整，重试
                 if (lastModified is null)
                 {
+                    Interlocked.Increment(ref StatRetries);
                     await Task.Delay(DelayMs(attempt));
                     continue;
                 }
@@ -218,10 +289,12 @@ internal static class Program
                 response?.Dispose();
                 if (attempt < RETRIES)
                 {
+                    Interlocked.Increment(ref StatRetries);
                     await Task.Delay(DelayMs(attempt));
                     continue;
                 }
-                // TODO 诊断用，定位后删
+                Interlocked.Increment(ref StatFailed);
+                // 最终失败的格子记到 stderr（进 hero_scan_cs_error.log）
                 lock (PrintLock)
                 {
                     Console.Error.WriteLine(
