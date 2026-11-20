@@ -8,10 +8,15 @@
     <AssemblyName>hero_scan_cs</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
 
-    <!-- 发布成 self-contained 单文件 exe：
-         目标机器不需要装 .NET，直接双击/被 Python 拉起都能跑 -->
+    <!-- 发布成裁剪的 self-contained 单文件 exe（不压缩以免每次启动解压开销）：
+         目标机器不需要装 .NET，体积大幅缩小且无 PDB 调试符号 -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
