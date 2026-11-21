@@ -130,6 +130,8 @@ def main():
             return
 
         skin_name_idx, last_modified_idx = _parse_header_row(header_row)
+        # 动态遍历表头中存在的全部槽位（兼容自动扩展出的 20+ 槽）
+        all_skin_ids = sorted(set(last_modified_idx) & set(skin_name_idx))
 
         # 英雄数量按「原皮（00 槽）Last-Modified 有没有值」来算：
         # 空号英雄在表里也占一行，但那只是占位，不能算英雄
@@ -162,12 +164,9 @@ def main():
             existing_names_norm = set()
             slot0_named = False
 
-            for skin_id in range(SKIN_START, SKIN_END + 1):
-                lm_i = last_modified_idx.get(skin_id)
-                nm_i = skin_name_idx.get(skin_id)
-
-                if lm_i is None or nm_i is None:
-                    continue
+            for skin_id in all_skin_ids:
+                lm_i = last_modified_idx[skin_id]
+                nm_i = skin_name_idx[skin_id]
 
                 last_modified = row_vals[lm_i] if lm_i < len(row_vals) else None
                 if not last_modified:

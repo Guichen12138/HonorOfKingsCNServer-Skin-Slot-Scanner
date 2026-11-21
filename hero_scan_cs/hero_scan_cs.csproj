@@ -8,13 +8,9 @@
     <AssemblyName>hero_scan_cs</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
 
-    <!-- 发布成裁剪的 self-contained 单文件 exe（不压缩以免每次启动解压开销）：
-         目标机器不需要装 .NET，体积大幅缩小且无 PDB 调试符号 -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <PublishTrimmed>true</PublishTrimmed>
-    <TrimMode>partial</TrimMode>
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <!-- 发布成 NativeAOT 原生单文件 exe（~5MB，16ms 瞬时冷启动，无需 .NET 运行时）。
+         若编译机未安装 C++ 生成工具，可加 -p:PublishAot=false -p:PublishSingleFile=true -p:SelfContained=true 发布。 -->
+    <PublishAot>true</PublishAot>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

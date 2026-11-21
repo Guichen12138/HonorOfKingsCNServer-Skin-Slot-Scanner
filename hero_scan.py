@@ -63,6 +63,11 @@ CS_THREADS = 512
 # C# 引擎错误日志超过 1MB 自动轮转
 CS_LOG_MAX_BYTES = 1024 * 1024
 
+# 尾部自适应续探（与 C# 引擎保持一致，突破 SKIN_END=19 上限永不漏扫）
+TAIL_TRIGGER_MARGIN = 2
+TAIL_STOP_MISSES = 4
+MAX_DYNAMIC_SKIN = 99
+
 
 # ============================================================
 # 懒加载 requests（走 C# 引擎时省掉 ~0.36s 导入耗时）
@@ -376,12 +381,73 @@ def scan_with_python(total_heroes):
                 flush=True,
             )
 
+    def _finish_hero(hid, st):
+        nonlocal total_failed, completed
+        hero_state.pop(hid, None)
+        total_failed += st["failed"]
+        if st["results"]:
+            st["results"].sort(key=lambda x: x["skin_id"])
+            all_results[hid] = st["results"]
+        completed += 1
+        _report_progress()
+
+    def _maybe_extend_or_finish(hid, st, pending_map, exec_pool):
+        # 尾部自适应续探：与 C# 引擎保持一致
+        if not st.get("in_tail"):
+            max_found = max((r["skin_id"] for r in st["results"]), default=-1)
+            if max_found < SKIN_END - TAIL_TRIGGER_MARGIN or SKIN_END >= MAX_DYNAMIC_SKIN:
+                _finish_hero(hid, st)
+                return
+            st["in_tail"] = True
+            st["next_slot"] = SKIN_END + 1
+            st["consec_misses"] = SKIN_END - max_found
+            st["fail_only_batches"] = 0
+        else:
+            batch_res = st.pop("tail_batch", {})
+            batch_hit = False
+            batch_failed = False
+            for sid in sorted(batch_res):
+                r = batch_res[sid]
+                if r["exists"]:
+                    st["results"].append(r)
+                    st["consec_misses"] = 0
+                    batch_hit = True
+                elif r.get("failed"):
+                    st["failed"] += 1
+                    st["consec_misses"] = 0
+                    batch_failed = True
+                else:
+                    st["consec_misses"] += 1
+
+            if batch_hit:
+                st["fail_only_batches"] = 0
+            elif batch_failed:
+                st["fail_only_batches"] += 1
+                if st["fail_only_batches"] >= 2:
+                    _finish_hero(hid, st)
+                    return
+
+        if st["next_slot"] > MAX_DYNAMIC_SKIN or st["consec_misses"] >= TAIL_STOP_MISSES:
+            _finish_hero(hid, st)
+            return
+
+        batch_size = min(
+            TAIL_STOP_MISSES - st["consec_misses"],
+            MAX_DYNAMIC_SKIN - st["next_slot"] + 1,
+        )
+        start_s = st["next_slot"]
+        st["next_slot"] = start_s + batch_size
+        st["left"] = batch_size
+        st["tail_batch"] = {}
+        for sid in range(start_s, start_s + batch_size):
+            pending_map[exec_pool.submit(check_skin, hid, sid)] = (hid, "tail", sid)
+
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=THREADS)
 
     try:
         # 第一波：并发探测所有英雄的 00 槽
         pending = {
-            executor.submit(check_skin, hero_id, SKIN_START): (hero_id, True)
+            executor.submit(check_skin, hero_id, SKIN_START): (hero_id, "first", SKIN_START)
             for hero_id in range(HERO_START, HERO_END + 1)
         }
 
@@ -392,31 +458,28 @@ def scan_with_python(total_heroes):
             )
 
             for fut in done_set:
-                hero_id, is_first = pending.pop(fut)
+                hero_id, phase, sid = pending.pop(fut)
 
                 try:
                     res = fut.result()
                 except Exception:
-                    if is_first:
+                    if phase == "first":
                         scan_errors += 1
                         completed += 1
                         _report_progress()
                     else:
                         st = hero_state.get(hero_id)
                         if st is not None:
-                            st["failed"] += 1
+                            if phase == "tail":
+                                st["tail_batch"][sid] = {"hero_id": hero_id, "skin_id": sid, "exists": False, "failed": True}
+                            else:
+                                st["failed"] += 1
                             st["left"] -= 1
                             if st["left"] == 0:
-                                hero_state.pop(hero_id, None)
-                                total_failed += st["failed"]
-                                if st["results"]:
-                                    st["results"].sort(key=lambda x: x["skin_id"])
-                                    all_results[hero_id] = st["results"]
-                                completed += 1
-                                _report_progress()
+                                _maybe_extend_or_finish(hero_id, st, pending, executor)
                     continue
 
-                if is_first:
+                if phase == "first":
                     if not res["exists"] and not res.get("failed"):
                         # 00 槽 404：空号直接跳过
                         skipped_heroes += 1
@@ -428,11 +491,9 @@ def scan_with_python(total_heroes):
                     failed = 1 if res.get("failed") else 0
 
                     if not remain_slots:
-                        total_failed += failed
-                        if results:
-                            all_results[hero_id] = results
-                        completed += 1
-                        _report_progress()
+                        st = {"results": results, "failed": failed, "left": 0}
+                        hero_state[hero_id] = st
+                        _maybe_extend_or_finish(hero_id, st, pending, executor)
                         continue
 
                     # 00 槽命中/失败：把 01~19 槽全部并入同一线程池并发扫描
@@ -441,9 +502,9 @@ def scan_with_python(total_heroes):
                         "failed": failed,
                         "left": len(remain_slots),
                     }
-                    for sid in remain_slots:
-                        pending[executor.submit(check_skin, hero_id, sid)] = (hero_id, False)
-                else:
+                    for s in remain_slots:
+                        pending[executor.submit(check_skin, hero_id, s)] = (hero_id, "main", s)
+                elif phase == "main":
                     st = hero_state.get(hero_id)
                     if st is None:
                         continue
@@ -454,13 +515,16 @@ def scan_with_python(total_heroes):
                     st["left"] -= 1
 
                     if st["left"] == 0:
-                        hero_state.pop(hero_id, None)
-                        total_failed += st["failed"]
-                        if st["results"]:
-                            st["results"].sort(key=lambda x: x["skin_id"])
-                            all_results[hero_id] = st["results"]
-                        completed += 1
-                        _report_progress()
+                        _maybe_extend_or_finish(hero_id, st, pending, executor)
+                else:
+                    # phase == "tail"
+                    st = hero_state.get(hero_id)
+                    if st is None:
+                        continue
+                    st["tail_batch"][sid] = res
+                    st["left"] -= 1
+                    if st["left"] == 0:
+                        _maybe_extend_or_finish(hero_id, st, pending, executor)
 
         _report_progress(force=True)
 
@@ -871,10 +935,35 @@ def main():
     new_records = 0
     updated_records = 0
 
+    # 动态补充超出 SKIN_END 的表头列（配合尾部自适应续探，突破 19 槽上限）
+    max_found_skin = max(
+        (r["skin_id"] for res in all_results.values() for r in res),
+        default=SKIN_END,
+    )
+    max_table_skin = max(
+        SKIN_END,
+        max_found_skin,
+        max(skin_name_columns, default=SKIN_END),
+        max(last_modified_columns, default=SKIN_END),
+    )
+    added_slot_cols = 0
+
+    for sid in range(SKIN_START, max_table_skin + 1):
+        if sid not in skin_name_columns:
+            new_col = ws.max_column + 1
+            ws.cell(row=1, column=new_col, value=f"{sid:02d}-皮肤名")
+            skin_name_columns[sid] = new_col
+            added_slot_cols += 1
+
+        if sid not in last_modified_columns:
+            new_col = ws.max_column + 1
+            ws.cell(row=1, column=new_col, value=f"{sid:02d}-Last-Modified")
+            last_modified_columns[sid] = new_col
+            added_slot_cols += 1
+
     # 记录变更明细，汇总输出并用于同步已更新的本地海报
     added_items = []
     updated_items = []
-    near_ceiling = []
 
     for hero_id in sorted(all_results):
 
@@ -889,14 +978,10 @@ def main():
             hero_rows[hero_id] = row
             new_heroes += 1
 
-        max_slot = -1
-
         for result in results:
 
             skin_id = result["skin_id"]
             last_modified = result["last_modified"]
-            if skin_id > max_slot:
-                max_slot = skin_id
 
             if skin_id not in skin_name_columns or skin_id not in last_modified_columns:
                 continue
@@ -943,9 +1028,6 @@ def main():
                             has_skin_name,
                             str(skin_name).strip() if has_skin_name else "",
                         ))
-
-        if max_slot >= SKIN_END - 1:
-            near_ceiling.append((hero_id, row, max_slot))
 
     # ========================================================
     # 英雄名自动填充（官网英雄列表）
@@ -1002,6 +1084,7 @@ def main():
         or new_records
         or updated_records
         or auto_named
+        or added_slot_cols
     )
 
     if has_changes or not excel_existed:
@@ -1018,7 +1101,7 @@ def main():
         ws.column_dimensions["A"].width = 12
         ws.column_dimensions["B"].width = 15
 
-        for skin_id in range(SKIN_START, SKIN_END + 1):
+        for skin_id in range(SKIN_START, max_table_skin + 1):
             name_col = skin_name_columns[skin_id]
             time_col = last_modified_columns[skin_id]
             ws.column_dimensions[get_column_letter(name_col)].width = 18
@@ -1083,14 +1166,9 @@ def main():
 
     print("=" * 70)
 
-    if near_ceiling:
-        tips = "、".join(
-            f"{_hero_label(hid, r)}({slot:02d}槽)"
-            for hid, r, slot in near_ceiling
-        )
+    if max_found_skin > SKIN_END:
         print(
-            f"提醒：{tips} 已接近皮肤槽上限（SKIN_END={SKIN_END:02d}），"
-            "后续如有新皮肤请在 common.py 中调大 SKIN_END。"
+            f"动态扩展：已自动续探至 {max_found_skin:02d} 槽并补充表头列。"
         )
 
     has_errors = bool(total_failed or scan_errors or cs_abnormal)

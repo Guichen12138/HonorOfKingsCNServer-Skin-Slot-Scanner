@@ -43,6 +43,9 @@ internal static class Program
     const double RETRY_DELAY = 0.5; // 每次重试前的等待秒数（按次数递增）
     const int TIMEOUT_MS = 10_000;  // 请求超时
     const int THROTTLE_MS = 1_000;  // 429 全局冷却窗口
+    const int TAIL_TRIGGER_MARGIN = 2; // 命中 >= skinEnd - 2 时触发尾部自适应续探
+    const int TAIL_STOP_MISSES = 4;    // 连续 4 个槽位 404 即停（覆盖已知 3 槽空洞）
+    const int MAX_DYNAMIC_SKIN = 99;   // 30{hero:D3}{skin:D2}.jpg 最大支持 99 槽
 
     static readonly string BaseUrl = "https://image.smoba.qq.com/Picture/HeroOriginalPainting/";
     static readonly RangeHeaderValue FirstByteRange = new(0, 0);
@@ -207,9 +210,17 @@ internal static class Program
         int remain = skinEnd > skinStart ? skinEnd - skinStart : 0;
         var results = new List<SkinResult>(remain + 1);
         int failed = 0;
+        int maxFound = -1;
 
-        if (first.Exists) results.Add(first);
-        else if (first.Failed) failed++;
+        if (first.Exists)
+        {
+            results.Add(first);
+            maxFound = first.SkinId;
+        }
+        else if (first.Failed)
+        {
+            failed++;
+        }
 
         if (remain > 0)
         {
@@ -223,8 +234,74 @@ internal static class Program
             for (int i = 0; i < subResults.Length; i++)
             {
                 var r = subResults[i];
-                if (r.Exists) results.Add(r);
-                else if (r.Failed) failed++;
+                if (r.Exists)
+                {
+                    results.Add(r);
+                    if (r.SkinId > maxFound) maxFound = r.SkinId;
+                }
+                else if (r.Failed)
+                {
+                    failed++;
+                }
+            }
+        }
+
+        // 尾部自适应续探：当有效槽位逼近 skinEnd（如 >= 17 槽）时，
+        // 自动向后成批探测直到连续 4 个 404，防止未来突破 19 槽漏扫
+        if (maxFound >= skinEnd - TAIL_TRIGGER_MARGIN && skinEnd < MAX_DYNAMIC_SKIN)
+        {
+            int nextSlot = skinEnd + 1;
+            int consecutiveMisses = skinEnd - maxFound;
+            int failOnlyBatches = 0;
+
+            while (nextSlot <= MAX_DYNAMIC_SKIN && consecutiveMisses < TAIL_STOP_MISSES)
+            {
+                int batchSize = Math.Min(
+                    TAIL_STOP_MISSES - consecutiveMisses,
+                    MAX_DYNAMIC_SKIN - nextSlot + 1);
+
+                var extTasks = new Task<SkinResult>[batchSize];
+                for (int i = 0; i < batchSize; i++)
+                {
+                    extTasks[i] = CheckSkinAsync(heroId, nextSlot + i);
+                }
+
+                var extResults = await Task.WhenAll(extTasks);
+                bool batchHit = false;
+                bool batchFailed = false;
+
+                for (int i = 0; i < extResults.Length; i++)
+                {
+                    var r = extResults[i];
+                    if (r.Exists)
+                    {
+                        results.Add(r);
+                        consecutiveMisses = 0;
+                        batchHit = true;
+                    }
+                    else if (r.Failed)
+                    {
+                        failed++;
+                        batchFailed = true;
+                        consecutiveMisses = 0;
+                    }
+                    else
+                    {
+                        consecutiveMisses++;
+                    }
+                }
+
+                nextSlot += batchSize;
+
+                if (batchHit)
+                {
+                    failOnlyBatches = 0;
+                }
+                else if (batchFailed)
+                {
+                    failOnlyBatches++;
+                    if (failOnlyBatches >= 2) break;
+                }
             }
         }
 
