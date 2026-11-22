@@ -1109,6 +1109,13 @@ def main():
 
         ws.freeze_panes = "C2"
 
+        # 清除 Excel 文档属性中的最后修改者姓名，避免泄露本机系统/Office 用户名
+        try:
+            wb.properties.creator = "openpyxl"
+            wb.properties.lastModifiedBy = ""
+        except Exception:
+            pass
+
         # 原子写入：先落临时文件再替换，避免写入中途被杀掉损坏原表
         tmp_file = EXCEL_FILE + ".tmp"
         try:
