@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
-import json
 import os
-import urllib.request
 import webbrowser
 
 import openpyxl
 
-# 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装
+# 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装 / 官网候选名
 # （common.py 和本脚本在同一目录，Python 会自动找到）
 from common import (
     EXCEL_FILE,
-    SKIN_END,
     SKIN_START,
+    fetch_official_skin_names,
+    norm_skin_name,
+    parse_header_row,
     pause,
     skin_image_url,
 )
@@ -23,75 +23,6 @@ try:
 except ImportError:
     def save_poster(url):
         pass
-
-
-HERO_LIST_URL = "https://pvp.qq.com/web201605/js/herolist.json"
-
-
-def _norm_skin_name(name):
-    """归一化皮肤名用于差集过滤（忽略不同中点符号和空格差异）"""
-    s = str(name).strip()
-    for ch in ("·", "●", "•", "・", "-", " ", "\u3000"):
-        s = s.replace(ch, "")
-    return s
-
-
-def _fetch_official_skin_names():
-    """
-    可选拉取官网 herolist.json 的皮肤名列表，返回 {hero_id: [皮肤名, ...]}。
-    仅在存在未命名皮肤时调用，作为人工填名参考（绝不自动写入 Excel）。
-    """
-    try:
-        req = urllib.request.Request(
-            HERO_LIST_URL,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            content = resp.read()
-
-        try:
-            data = json.loads(content.decode("utf-8-sig"))
-        except UnicodeDecodeError:
-            data = json.loads(content.decode("gbk"))
-
-        result = {}
-        for item in data:
-            try:
-                hid = int(item["ename"])
-                raw = str(item.get("skin_name") or "").strip()
-                if not raw:
-                    continue
-                names = [s.strip() for s in raw.split("|") if s.strip()]
-                if names:
-                    result[hid] = names
-            except (KeyError, TypeError, ValueError):
-                continue
-        return result
-    except Exception:
-        return {}
-
-
-def _parse_header_row(header_row):
-    """从只读模式的第一行表头元组中解析 {skin_id: 0-based 索引}"""
-    skin_name_idx = {}
-    last_modified_idx = {}
-
-    for idx, val in enumerate(header_row):
-        if not val:
-            continue
-        header = str(val)
-        if header.endswith("-皮肤名"):
-            try:
-                skin_name_idx[int(header.split("-")[0])] = idx
-            except ValueError:
-                pass
-        elif header.endswith("-Last-Modified"):
-            try:
-                last_modified_idx[int(header.split("-")[0])] = idx
-            except ValueError:
-                pass
-
-    return skin_name_idx, last_modified_idx
 
 
 def main():
@@ -129,7 +60,7 @@ def main():
             pause()
             return
 
-        skin_name_idx, last_modified_idx = _parse_header_row(header_row)
+        skin_name_idx, last_modified_idx = parse_header_row(header_row)
         # 动态遍历表头中存在的全部槽位（兼容自动扩展出的 20+ 槽）
         all_skin_ids = sorted(set(last_modified_idx) & set(skin_name_idx))
 
@@ -176,7 +107,7 @@ def main():
 
                 skin_name = row_vals[nm_i] if nm_i < len(row_vals) else None
                 if skin_name is not None and str(skin_name).strip() != "":
-                    existing_names_norm.add(_norm_skin_name(skin_name))
+                    existing_names_norm.add(norm_skin_name(skin_name))
                     if skin_id == SKIN_START:
                         slot0_named = True
                     continue
@@ -225,7 +156,7 @@ def main():
         return
 
     # 有待命名皮肤时，顺手拉一次官网皮肤名列表供人工参考
-    official_skins = _fetch_official_skin_names()
+    official_skins = fetch_official_skin_names(timeout=6)
 
     # ============================================================
     # 一个英雄一个英雄处理
@@ -256,7 +187,7 @@ def main():
                 pool = official_list[1:] if hero["slot0_named"] else official_list
                 candidates = [
                     name for name in pool
-                    if _norm_skin_name(name) not in existing_names_norm
+                    if norm_skin_name(name) not in existing_names_norm
                 ]
                 if candidates:
                     print("官网候选皮肤名参考：" + " / ".join(candidates))

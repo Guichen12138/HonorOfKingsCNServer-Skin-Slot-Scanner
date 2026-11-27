@@ -7,18 +7,17 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import timedelta, timezone
 from email.utils import parsedate_to_datetime
 
-# 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装
+# 共用常量与工具：Excel 路径 / 槽位范围 / 表头解析 / URL 拼装 / 官网英雄名
 # （common.py 和本脚本在同一目录，Python 会自动找到）
 from common import (
     APP_DIR,
     EXCEL_FILE,
     SKIN_END,
     SKIN_START,
+    fetch_official_hero_names as _common_fetch_hero_names,
     parse_header_columns,
     skin_image_url,
 )
@@ -552,50 +551,12 @@ def scan_with_python(total_heroes):
 
 
 # ============================================================
-# 官网英雄列表（英雄名自动填充用，使用标准库 urllib 避免导入 requests）
+# 官网英雄列表（复用 common.py 标准库实现）
 # ============================================================
-
-HERO_LIST_URL = "https://pvp.qq.com/web201605/js/herolist.json"
-
 
 def fetch_official_hero_names():
 
-    """
-    拉官网英雄列表，返回 {英雄编号: 官方英雄名}。
-
-    任何失败都返回空 dict：
-    自动填充是锦上添花，不能影响扫描主流程。
-    """
-
-    try:
-        req = urllib.request.Request(
-            HERO_LIST_URL,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            content = resp.read()
-
-        try:
-            data = json.loads(content.decode("utf-8-sig"))
-        except UnicodeDecodeError:
-            data = json.loads(content.decode("gbk"))
-
-        names = {}
-
-        for item in data:
-            try:
-                names[int(item["ename"])] = str(item["cname"]).strip()
-            except (KeyError, TypeError, ValueError):
-                continue
-
-        return names
-
-    except Exception as exc:
-        print(
-            f"官网英雄列表获取失败，"
-            f"本次跳过英雄名自动填充：{exc}"
-        )
-        return {}
+    return _common_fetch_hero_names(timeout=TIMEOUT, warn_on_error=True)
 
 
 # ============================================================
