@@ -37,7 +37,7 @@ dotnet publish $ViewerProj -c Release -r win-x64 -p:Version=$Version -o $ViewerO
 if ($LASTEXITCODE -ne 0) { throw "SkinViewer 编译失败" }
 
 $BuiltExe = Join-Path $ViewerOut "王者荣耀皮肤格子查看器.exe"
-$SetupExe = Join-Path $DistDir "王者荣耀皮肤格子查看器_Setup.exe"
+$SetupExe = Join-Path $DistDir "SkinViewer_Setup_v$Version.exe"
 $UpdateZip = Join-Path $DistDir "SkinViewer_v$Version.zip"
 
 # Setup.exe 与主程序共用同一个独立单文件包（按文件名/安装态自动进入安装向导）

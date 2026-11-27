@@ -16,7 +16,7 @@
 
 ### 下载与使用教程
 1. **下载安装包**
-   前往仓库右侧 **[Releases](https://github.com/Guichen12138/HonorOfKingsCNServer-Skin-Slot-Scanner/releases/latest)** 页面，在底部 **Assets（资产）** 中下载 **`王者荣耀皮肤格子查看器_Setup.exe`**。
+   前往仓库右侧 **[Releases](https://github.com/Guichen12138/HonorOfKingsCNServer-Skin-Slot-Scanner/releases/latest)** 页面，在底部 **Assets（资产）** 中下载 **`SkinViewer_Setup_v1.0.0.exe`**（安装后程序与快捷方式名即为「王者荣耀皮肤格子查看器」）。
    > 若首次双击弹出 Windows SmartScreen「Windows 已保护你的电脑」提示，点击 **「更多信息」→「仍要运行」** 即可。
 2. **安装程序**
    打开安装向导后可自由选择安装文件夹（默认优先选择非系统盘根目录下的 `王者荣耀皮肤格子查看器` 目录，避开系统盘权限限制），按需勾选创建桌面快捷方式，点击 **「立即安装」**。
