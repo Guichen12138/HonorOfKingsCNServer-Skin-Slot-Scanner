@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>王者荣耀皮肤格子查看器</AssemblyName>
+    <Version>1.0.0</Version>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <PathMap>$(MSBuildProjectDirectory)=.</PathMap>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 构建脚本会把初始表格与编译好的 Uninstall.exe 放进 Assets/ 作为内嵌资源 -->
+    <EmbeddedResource Include="Assets\hero_skin_scan.xlsx" LogicalName="Payload.Excel" Condition="Exists('Assets\hero_skin_scan.xlsx')" />
+    <EmbeddedResource Include="Assets\Uninstall.exe" LogicalName="Payload.Uninstall" Condition="Exists('Assets\Uninstall.exe')" />
+  </ItemGroup>
+
+</Project>
