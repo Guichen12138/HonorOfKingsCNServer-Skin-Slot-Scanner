@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [string]$ExcelSource = ""
 )
 
@@ -11,6 +11,13 @@ if ([string]::IsNullOrWhiteSpace($ExcelSource)) {
 
 $UninstProj = Join-Path $Root "Uninstaller/Uninstaller.csproj"
 $ViewerProj = Join-Path $Root "SkinViewer/SkinViewer.csproj"
+
+# 未显式传入 -Version 时，以 SkinViewer.csproj 中的 <Version> 为唯一版本来源
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = ([xml](Get-Content -Raw -Encoding UTF8 $ViewerProj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($Version)) { throw "无法从 SkinViewer.csproj 读取 <Version>" }
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "版本号格式应为 X.Y.Z，当前为: $Version" }
 $AssetsDir  = Join-Path $Root "SkinViewer/Assets"
 $DistDir    = Join-Path $Root "dist"
 $TmpOut     = Join-Path $Root "_tmp_build"

@@ -17,7 +17,8 @@ internal sealed record ViewerUpdateInfo(
     string Version,
     string DownloadUrl,
     string AssetName,
-    string ReleaseNotes);
+    string ReleaseNotes,
+    string? Sha256);
 
 internal static class UpdateService
 {
@@ -199,7 +200,7 @@ internal static class UpdateService
 
     private static async Task<ViewerUpdateInfo?> TryCheckViewerViaApiAsync(Version currentVer, CancellationToken ct)
     {
-        string apiUrl = $"https://api.github.com/repos/{AppConfig.RepoOwner}/{AppConfig.RepoName}/releases?per_page=10";
+        string apiUrl = $"https://api.github.com/repos/{AppConfig.RepoOwner}/{AppConfig.RepoName}/releases?per_page=30";
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -227,10 +228,14 @@ internal static class UpdateService
                     string dlUrl = asset.TryGetProperty("browser_download_url", out var u) ? (u.GetString() ?? "") : "";
                     if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(dlUrl)) continue;
 
-                    if (TryMatchNewerViewerAsset(name, dlUrl, notes, currentVer, ref bestVer, ref bestInfo))
+                    // GitHub 为每个附件提供 "sha256:<hex>" 摘要，用于下载后校验完整性
+                    string? sha = null;
+                    if (asset.TryGetProperty("digest", out var dg) && dg.ValueKind == JsonValueKind.String)
                     {
-                        // 继续遍历以选最高版本
+                        sha = ParseSha256Digest(dg.GetString());
                     }
+
+                    TryMatchNewerViewerAsset(name, dlUrl, notes, sha, currentVer, ref bestVer, ref bestInfo);
                 }
             }
 
@@ -279,7 +284,8 @@ internal static class UpdateService
                         string relPath = m.Groups[1].Value;
                         string assetName = Uri.UnescapeDataString(m.Groups[2].Value);
                         string fullUrl = "https://github.com" + relPath;
-                        TryMatchNewerViewerAsset(assetName, fullUrl, "", currentVer, ref bestVer, ref bestInfo);
+                        // 此兜底线路拿不到官方摘要：Sha256 置空，下载时将只允许走 GitHub 官方地址
+                        TryMatchNewerViewerAsset(assetName, fullUrl, "", null, currentVer, ref bestVer, ref bestInfo);
                     }
                 }
 
@@ -295,10 +301,20 @@ internal static class UpdateService
         return null;
     }
 
+    private static string? ParseSha256Digest(string? digest)
+    {
+        if (string.IsNullOrWhiteSpace(digest)) return null;
+        const string prefix = "sha256:";
+        if (!digest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        string hex = digest[prefix.Length..].Trim();
+        return Regex.IsMatch(hex, "^[0-9a-fA-F]{64}$") ? hex.ToLowerInvariant() : null;
+    }
+
     private static bool TryMatchNewerViewerAsset(
         string assetName,
         string downloadUrl,
         string notes,
+        string? sha256,
         Version currentVer,
         ref Version? bestVer,
         ref ViewerUpdateInfo? bestInfo)
@@ -318,7 +334,7 @@ internal static class UpdateService
             if (bestVer is null || ver > bestVer)
             {
                 bestVer = ver;
-                bestInfo = new ViewerUpdateInfo(m.Groups[1].Value, downloadUrl, assetName, notes.Trim());
+                bestInfo = new ViewerUpdateInfo(m.Groups[1].Value, downloadUrl, assetName, notes.Trim(), sha256);
                 return true;
             }
         }
@@ -331,11 +347,24 @@ internal static class UpdateService
         IProgress<int>? progress = null,
         CancellationToken ct = default)
     {
-        string[] downloadUrls =
-        {
-            "https://gh-proxy.com/" + info.DownloadUrl,
-            info.DownloadUrl,
-        };
+        byte[] payload = await DownloadVerifiedPackageAsync(info, progress, ct);
+        await ApplyViewerPackageBytesAsync(payload, info.AssetName, installDir, progress, ct);
+    }
+
+    /// <summary>
+    /// 下载更新包并校验完整性：
+    /// - 拿到 GitHub 官方 SHA256 摘要时，先走国内镜像加速、再走官方地址，任一线路内容与摘要不一致即丢弃；
+    /// - 拿不到摘要时（如 API 限流走了兜底线路），只允许从 GitHub 官方地址下载，绝不使用第三方镜像。
+    /// </summary>
+    public static async Task<byte[]> DownloadVerifiedPackageAsync(
+        ViewerUpdateInfo info,
+        IProgress<int>? progress = null,
+        CancellationToken ct = default)
+    {
+        bool hasDigest = !string.IsNullOrEmpty(info.Sha256);
+        string[] downloadUrls = hasDigest
+            ? new[] { "https://gh-proxy.com/" + info.DownloadUrl, info.DownloadUrl }
+            : new[] { info.DownloadUrl };
 
         byte[]? payload = null;
         Exception? lastErr = null;
@@ -343,6 +372,7 @@ internal static class UpdateService
         foreach (string url in downloadUrls)
         {
             ct.ThrowIfCancellationRequested();
+            payload = null;
             try
             {
                 using var resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -363,22 +393,38 @@ internal static class UpdateService
                         progress?.Report((int)Math.Clamp(readTotal * 100L / total, 0, 98));
                     }
                 }
-                payload = ms.ToArray();
-                if (payload.Length > 100 * 1024) break;
+                byte[] data = ms.ToArray();
+                if (data.Length < 100 * 1024)
+                {
+                    lastErr = new InvalidDataException("文件不完整");
+                    continue;
+                }
+
+                if (hasDigest)
+                {
+                    string actual = Sha256Hex(data);
+                    if (!string.Equals(actual, info.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        lastErr = new InvalidDataException("SHA256 校验不一致，已丢弃该线路下载的文件");
+                        continue;
+                    }
+                }
+
+                payload = data;
+                break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 lastErr = ex;
-                payload = null;
             }
         }
 
-        if (payload is null || payload.Length < 100 * 1024)
+        if (payload is null)
         {
             throw new InvalidOperationException("下载查看器更新包失败：" + (lastErr?.Message ?? "文件不完整"));
         }
 
-        await ApplyViewerPackageBytesAsync(payload, info.AssetName, installDir, progress, ct);
+        return payload;
     }
 
     public static async Task ApplyViewerPackageBytesAsync(

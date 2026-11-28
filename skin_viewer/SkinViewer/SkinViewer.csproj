@@ -7,7 +7,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>王者荣耀皮肤格子查看器</AssemblyName>
-    <Version>1.0.0</Version>
+    <!-- 查看器版本号的唯一来源：发版时只改这里，build.ps1 会自动读取；对应 Release 标签为 viewer-v<版本号> -->
+    <Version>1.0.1</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
 

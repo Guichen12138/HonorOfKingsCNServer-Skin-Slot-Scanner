@@ -544,6 +544,9 @@ internal sealed class ViewerForm : Form
                 _lblAppUpdateInfo.Text = $"发现查看器新版本 v{_pendingAppUpdate.Version}（当前 v{AppConfig.CurrentVersion}），支持一键在线升级";
                 _appUpdateBanner.Visible = true;
                 AppendLog($"[程序更新] 发现新版查看器 v{_pendingAppUpdate.Version}（{_pendingAppUpdate.AssetName}）");
+                AppendLog(string.IsNullOrEmpty(_pendingAppUpdate.Sha256)
+                    ? "  安全校验：本次未取到官方 SHA256 校验值，升级时将只从 GitHub 官方地址下载。"
+                    : "  安全校验：升级包下载后将核对 GitHub 官方 SHA256 校验值，不一致会自动拒绝安装。");
                 if (!string.IsNullOrEmpty(_pendingAppUpdate.ReleaseNotes))
                 {
                     AppendLog("  更新说明：" + _pendingAppUpdate.ReleaseNotes.Replace("\n", "\n  "));
